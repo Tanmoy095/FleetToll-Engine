@@ -1,4 +1,4 @@
-# Toll Calculator — Senior Engineer Showcase
+# FleetToll Engine
 
 This repository is a production-oriented proof-of-concept for a truck toll calculation pipeline implemented in Go. It's written as a microservice suite demonstrating event-driven streaming (WebSocket -> Kafka -> consumer -> aggregator) with clear separation of concerns and straightforward control flow — suitable for a live demo and a technical interview walkthrough.
 
@@ -394,13 +394,3 @@ Roadmap (prioritized):
 - Point to code that shows practical skills: producer/consumer wiring, simple service boundaries, and portability of `types` package.
 - Explain trade-offs and the concrete steps you'd make to productionize the system.
 - Offer a 2–3 minute live demo using the `obu` simulator and the aggregator `/invoice` endpoint.
-
----
-
-If you want, I can now:
-
-- add a `.env.example` file to the repo,
-- create Dockerfiles for each service and a full `docker-compose.yml` to run the entire stack,
-- or implement persistence in `aggregator` and a small integration test harness.
-
-Which of these should I do next?
