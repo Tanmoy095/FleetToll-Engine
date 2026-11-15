@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	fleettollv1 "github.com/Tanmoy095/FleetToll-Engine/api/fleettoll/v1"
 	"github.com/Tanmoy095/FleetToll-Engine/internal/postgres"
 	"github.com/Tanmoy095/FleetToll-Engine/types"
 )
@@ -79,5 +80,38 @@ func TestPostgresStoreTreatsEventIDAsData(t *testing.T) {
 	}
 	if _, err := pool.Exec(ctx, `SELECT 1 FROM aggregated_distance_events LIMIT 1`); err != nil {
 		t.Fatalf("table missing after injection-shaped input: %v", err)
+	}
+}
+
+func TestPostgresAggregatorGRPCRoundTrip(t *testing.T) {
+	dsn := os.Getenv("DATABASE_TEST_URL")
+	if dsn == "" {
+		t.Skip("set DATABASE_TEST_URL to run against PostgreSQL")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	pool, err := postgres.Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+
+	_, server, conn := startGRPCTestServer(t, NewInvoiceAggregator(NewPostgresStore(pool)))
+	defer server.Stop()
+	defer conn.Close()
+	rpc := fleettollv1.NewAggregatorServiceClient(conn)
+	obuID := time.Now().UnixNano() % 1_000_000_000
+	request := &fleettollv1.AggregateDistanceRequest{EventId: fmt.Sprintf("grpc-pg:%d", time.Now().UnixNano()), ObuId: obuID, DistanceKm: 3.75, EventUnixNano: time.Now().UnixNano()}
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := rpc.AggregateDistance(ctx, request); err != nil {
+			t.Fatalf("AggregateDistance() error = %v", err)
+		}
+	}
+	invoice, err := rpc.GetInvoice(ctx, &fleettollv1.GetInvoiceRequest{ObuId: obuID})
+	if err != nil {
+		t.Fatalf("GetInvoice() error = %v", err)
+	}
+	if invoice.GetTotalDistanceKm() != 3.75 {
+		t.Fatalf("invoice distance = %v, want 3.75 after replay", invoice.GetTotalDistanceKm())
 	}
 }
