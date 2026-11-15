@@ -6,16 +6,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
+	"net"
 	"os"
 	"strconv"
 	"testing"
 	"time"
 
+	fleettollv1 "github.com/Tanmoy095/FleetToll-Engine/api/fleettoll/v1"
 	"github.com/Tanmoy095/FleetToll-Engine/distance_calculator/client"
 	"github.com/Tanmoy095/FleetToll-Engine/types"
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
+	"google.golang.org/grpc"
 )
 
 func TestKafkaConsumerProcessesRealTelemetryIntoAggregator(t *testing.T) {
@@ -47,20 +48,23 @@ func TestKafkaConsumerProcessesRealTelemetryIntoAggregator(t *testing.T) {
 		_, _ = admin.DeleteTopics(deleteCtx, []string{topic})
 	}()
 
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for test aggregator gRPC: %v", err)
+	}
 	aggregated := make(chan types.Distance, 2)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
-		var distance types.Distance
-		if err := json.NewDecoder(r.Body).Decode(&distance); err != nil {
-			http.Error(w, "invalid distance", http.StatusBadRequest)
-			return
-		}
-		aggregated <- distance
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	rpcServer := grpc.NewServer()
+	fleettollv1.RegisterAggregatorServiceServer(rpcServer, &recordingIntegrationAggregator{UnimplementedAggregatorServiceServer: fleettollv1.UnimplementedAggregatorServiceServer{}, aggregated: aggregated})
+	go func() { _ = rpcServer.Serve(listener) }()
+	defer rpcServer.Stop()
+	defer listener.Close()
+	aggregatorClient, err := client.DialGRPC(ctx, listener.Addr().String())
+	if err != nil {
+		t.Fatalf("create aggregator gRPC client: %v", err)
+	}
+	defer aggregatorClient.Close()
 
-	consumer, err := NewKafkaConsumer(topic, NewCalculatorService(), client.NewClient(server.URL))
+	consumer, err := NewKafkaConsumer(topic, NewCalculatorService(), aggregatorClient)
 	if err != nil {
 		t.Fatalf("create distance consumer: %v", err)
 	}
@@ -129,4 +133,14 @@ func TestKafkaConsumerProcessesRealTelemetryIntoAggregator(t *testing.T) {
 	if got[1].OBUID != second.OBUID || got[1].Value < 111.19 || got[1].Value > 111.20 {
 		t.Errorf("second aggregate = %+v, want about 111.195 km for OBU %d", got[1], second.OBUID)
 	}
+}
+
+type recordingIntegrationAggregator struct {
+	fleettollv1.UnimplementedAggregatorServiceServer
+	aggregated chan<- types.Distance
+}
+
+func (s *recordingIntegrationAggregator) AggregateDistance(_ context.Context, request *fleettollv1.AggregateDistanceRequest) (*fleettollv1.AggregateDistanceResponse, error) {
+	s.aggregated <- types.Distance{EventID: request.GetEventId(), OBUID: int(request.GetObuId()), Value: request.GetDistanceKm(), Unix: request.GetEventUnixNano()}
+	return &fleettollv1.AggregateDistanceResponse{Accepted: true}, nil
 }

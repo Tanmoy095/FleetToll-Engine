@@ -13,9 +13,7 @@ import (
 	"github.com/Tanmoy095/FleetToll-Engine/internal/postgres"
 )
 
-const (
-	aggregatorEndpoint = "http://127.0.0.1:3000/aggregate"
-)
+const defaultAggregatorGRPCTarget = "127.0.0.1:3001"
 
 func main() {
 	topic := os.Getenv("KAFKA_TOPIC")
@@ -41,8 +39,17 @@ func main() {
 	}
 	svc = NewLogMiddleware(svc)
 
-	// Creating a client to send data to Aggregator
-	aggregatorClient := client.NewClient(aggregatorEndpoint)
+	grpcTarget := os.Getenv("AGGREGATOR_GRPC_TARGET")
+	if grpcTarget == "" {
+		grpcTarget = defaultAggregatorGRPCTarget
+	}
+	dialCtx, cancelDial := context.WithTimeout(context.Background(), 5*time.Second)
+	aggregatorClient, err := client.DialGRPC(dialCtx, grpcTarget)
+	cancelDial()
+	if err != nil {
+		log.Fatalf("connect to aggregator gRPC service: %v", err)
+	}
+	defer aggregatorClient.Close()
 
 	kafkaConsumer, err := NewKafkaConsumer(topic, svc, aggregatorClient)
 

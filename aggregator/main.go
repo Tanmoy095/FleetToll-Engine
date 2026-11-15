@@ -10,11 +10,14 @@ import (
 	"log"
 	"math"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Tanmoy095/FleetToll-Engine/internal/postgres"
@@ -25,6 +28,7 @@ const maxAggregateBodyBytes = 1 << 20
 
 func main() {
 	listenAddr := flag.String("listenaddr", ":3000", "the listen address of the HTTP server")
+	grpcListenAddr := flag.String("grpc-listenaddr", "127.0.0.1:3001", "the listen address of the internal gRPC server")
 	flag.Parse()
 
 	var store storer = NewMemoryStore()
@@ -41,14 +45,61 @@ func main() {
 		log.Print("DATABASE_URL is unset; using volatile in-memory aggregation")
 	}
 	svc := NewLoggingMiddleware(NewInvoiceAggregator(store))
-	if err := makeHttpTransport(*listenAddr, svc); err != nil {
-		log.Fatalf("aggregator HTTP server failed: %v", err)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := runTransports(ctx, *listenAddr, *grpcListenAddr, svc); err != nil {
+		log.Fatalf("aggregator server failed: %v", err)
 	}
 }
 
-func makeHttpTransport(listenAddr string, svc Aggregator) error {
-	fmt.Println("HTTP transport running on port ", listenAddr)
-	return http.ListenAndServe(listenAddr, newHTTPHandler(svc))
+func runTransports(ctx context.Context, httpAddr, grpcAddr string, svc Aggregator) error {
+	httpListener, err := net.Listen("tcp", httpAddr)
+	if err != nil {
+		return fmt.Errorf("listen for HTTP: %w", err)
+	}
+	defer httpListener.Close()
+	grpcListener, err := net.Listen("tcp", grpcAddr)
+	if err != nil {
+		return fmt.Errorf("listen for gRPC: %w", err)
+	}
+	defer grpcListener.Close()
+	httpServer := &http.Server{Handler: newHTTPHandler(svc), ReadHeaderTimeout: 5 * time.Second}
+	grpcServer := newGRPCServer(svc)
+	httpErrors := make(chan error, 1)
+	grpcErrors := make(chan error, 1)
+	go func() { httpErrors <- httpServer.Serve(httpListener) }()
+	go func() { grpcErrors <- grpcServer.Serve(grpcListener) }()
+	fmt.Printf("aggregator HTTP listening on %s; gRPC listening on %s\n", httpAddr, grpcAddr)
+
+	select {
+	case err := <-httpErrors:
+		grpcServer.Stop()
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return fmt.Errorf("HTTP server: %w", err)
+	case err := <-grpcErrors:
+		_ = httpServer.Close()
+		if err != nil {
+			return fmt.Errorf("gRPC server: %w", err)
+		}
+		return nil
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		shutdownErr := httpServer.Shutdown(shutdownCtx)
+		grpcStopped := make(chan struct{})
+		go func() { grpcServer.GracefulStop(); close(grpcStopped) }()
+		select {
+		case <-grpcStopped:
+		case <-shutdownCtx.Done():
+			grpcServer.Stop()
+		}
+		if shutdownErr != nil {
+			return fmt.Errorf("shut down HTTP server: %w", shutdownErr)
+		}
+		return nil
+	}
 }
 
 func newHTTPHandler(svc Aggregator) http.Handler {

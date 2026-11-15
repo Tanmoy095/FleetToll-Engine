@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Tanmoy095/FleetToll-Engine/distance_calculator/client"
 	"github.com/Tanmoy095/FleetToll-Engine/types"
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 	"github.com/sirupsen/logrus"
@@ -30,10 +29,14 @@ type kafkaMessageReader interface {
 type kafkaConsumer struct {
 	consumer    kafkaMessageReader
 	calcService CalculatorServicer
-	aggClient   *client.Client
+	aggClient   distanceAggregatorClient
 }
 
-func NewKafkaConsumer(topic string, svc CalculatorServicer, aggClient *client.Client) (*kafkaConsumer, error) {
+type distanceAggregatorClient interface {
+	AggregateInvoiceContext(context.Context, types.Distance) error
+}
+
+func NewKafkaConsumer(topic string, svc CalculatorServicer, aggClient distanceAggregatorClient) (*kafkaConsumer, error) {
 	brokers := os.Getenv("KAFKA_BROKERS")
 	if brokers == "" {
 		brokers = "localhost:9092"
@@ -45,7 +48,7 @@ func NewKafkaConsumer(topic string, svc CalculatorServicer, aggClient *client.Cl
 	return newKafkaConsumer(topic, brokers, groupID, svc, aggClient)
 }
 
-func newKafkaConsumer(topic, brokers, groupID string, svc CalculatorServicer, aggClient *client.Client) (*kafkaConsumer, error) {
+func newKafkaConsumer(topic, brokers, groupID string, svc CalculatorServicer, aggClient distanceAggregatorClient) (*kafkaConsumer, error) {
 	if topic == "" {
 		return nil, errors.New("Kafka topic must not be empty")
 	}
@@ -75,7 +78,7 @@ func newKafkaConsumer(topic, brokers, groupID string, svc CalculatorServicer, ag
 	return newKafkaConsumerWithReader(c, svc, aggClient), nil
 }
 
-func newKafkaConsumerWithReader(reader kafkaMessageReader, svc CalculatorServicer, aggClient *client.Client) *kafkaConsumer {
+func newKafkaConsumerWithReader(reader kafkaMessageReader, svc CalculatorServicer, aggClient distanceAggregatorClient) *kafkaConsumer {
 	return &kafkaConsumer{consumer: reader, calcService: svc, aggClient: aggClient}
 }
 
