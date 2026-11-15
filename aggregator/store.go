@@ -8,18 +8,27 @@ import (
 )
 
 type MemoryStore struct {
-	mu   sync.RWMutex
-	data map[int]float64
+	mu     sync.RWMutex
+	data   map[int]float64
+	events map[string]types.Distance
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		data: make(map[int]float64),
+		data:   make(map[int]float64),
+		events: make(map[string]types.Distance),
 	}
 }
 func (s *MemoryStore) Insert(distance types.Distance) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if previous, exists := s.events[distance.EventID]; exists {
+		if previous.OBUID != distance.OBUID || previous.Value != distance.Value {
+			return ErrEventIDConflict
+		}
+		return nil
+	}
+	s.events[distance.EventID] = distance
 	s.data[distance.OBUID] += distance.Value
 	return nil
 

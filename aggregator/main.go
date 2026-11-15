@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -11,9 +12,12 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/Tanmoy095/FleetToll-Engine/internal/postgres"
 	"github.com/Tanmoy095/FleetToll-Engine/types"
 )
 
@@ -23,7 +27,19 @@ func main() {
 	listenAddr := flag.String("listenaddr", ":3000", "the listen address of the HTTP server")
 	flag.Parse()
 
-	store := NewMemoryStore()
+	var store storer = NewMemoryStore()
+	if databaseURL := os.Getenv("DATABASE_URL"); databaseURL != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		pool, err := postgres.Open(ctx, databaseURL)
+		cancel()
+		if err != nil {
+			log.Fatalf("open PostgreSQL: %v", err)
+		}
+		defer pool.Close()
+		store = NewPostgresStore(pool)
+	} else {
+		log.Print("DATABASE_URL is unset; using volatile in-memory aggregation")
+	}
 	svc := NewLoggingMiddleware(NewInvoiceAggregator(store))
 	if err := makeHttpTransport(*listenAddr, svc); err != nil {
 		log.Fatalf("aggregator HTTP server failed: %v", err)
@@ -109,11 +125,15 @@ func handleAggregate(svc Aggregator) http.HandlerFunc {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "request body must contain one JSON object"})
 			return
 		}
-		if distance.OBUID <= 0 || math.IsNaN(distance.Value) || math.IsInf(distance.Value, 0) || distance.Value < 0 || distance.Unix <= 0 {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "distance must include a positive OBU ID, non-negative finite value, and positive timestamp"})
+		if !validEventID(distance.EventID) || distance.OBUID <= 0 || math.IsNaN(distance.Value) || math.IsInf(distance.Value, 0) || distance.Value < 0 || distance.Unix <= 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "distance must include an event ID, positive OBU ID, non-negative finite value, and positive timestamp"})
 			return
 		}
 		if err := svc.AggregateDistance(distance); err != nil {
+			if errors.Is(err, ErrEventIDConflict) {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": "event ID conflicts with an existing distance"})
+				return
+			}
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not aggregate distance"})
 			return
 		}
