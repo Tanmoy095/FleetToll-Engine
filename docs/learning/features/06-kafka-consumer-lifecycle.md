@@ -29,9 +29,9 @@ The consumer owns Kafka polling and offsets. The calculator owns its current in-
 
 ## Consistency and failure behavior
 
-This is an at-least-once delivery attempt, not an end-to-end exactly-once guarantee. If Kafka delivered a record and HTTP aggregation succeeded but the response was lost, the consumer does not commit and a later run may repeat that business write. The aggregator currently has no idempotency key.
+This is an at-least-once delivery attempt, not an end-to-end exactly-once guarantee. If Kafka delivered a record and gRPC aggregation succeeded but the response was lost, the consumer does not commit and a later run may repeat that business write. The aggregator's event ledger deduplicates the repeated event ID.
 
-There is a second, more fundamental gap: `CalculateDistance` advances its in-memory previous-point state before HTTP succeeds. A failed HTTP call followed by replay in the same process calculates from an already-advanced point; a process restart loses the entire map. Explicit offset commits alone cannot repair this. The next durable-processing design must persist state and inbox/event identity transactionally, then make downstream aggregation idempotent. PostgreSQL/inbox work must precede any claim of crash-safe distance accounting.
+There is a second, more fundamental gap in volatile mode: `CalculateDistance` advances its in-memory previous-point state before gRPC succeeds; a process restart loses the map. Explicit offset commits alone cannot repair this. Durable mode addresses this through a transactional PostgreSQL inbox and trip state, then idempotent aggregation. Kafka, PostgreSQL and gRPC still do not share one transaction, so the guarantee is at-least-once with idempotent effects.
 
 Malformed or invalid records stop the consumer without committing. That avoids silently discarding data, but a poison event can block its partition. A bounded retry/DLQ policy with auditable replay and alerting is required before production.
 
@@ -56,14 +56,14 @@ One record is processed at a time per consumer instance, so partition order is p
 
 ## Interview explanation
 
-“I disabled auto-commit and explicitly commit each Kafka record only after its downstream HTTP operation succeeds. The loop stops on errors so it cannot advance later offsets past a failed earlier record. This yields replay potential, but the HTTP write and Kafka offset are separate systems: a lost response can duplicate the write. Because calculation state and invoice state are also in memory, I do not call this crash-safe or exactly-once. Durable state plus idempotent inbox/outbox processing is the next architectural step.”
+"I disabled auto-commit and explicitly commit each Kafka record only after its downstream gRPC operation succeeds. The loop stops on errors so it cannot advance later offsets past a failed earlier record. This yields replay potential, but the RPC and Kafka offset are separate systems: a lost response can repeat the write. In PostgreSQL mode, the processing inbox and trip baseline commit together, while the aggregate ledger deduplicates the same event ID. Those are separate database effects around a separate Kafka offset, so I call it at-least-once with idempotent database effects, not exactly-once."
 
 Questions to practice:
 
 1. Why can committing after HTTP still produce duplicate billing?
 2. What does Kafka commit ordering guarantee within one partition?
 3. Why does a fail-stop poison event hurt availability?
-4. Why isn't an idempotent Kafka producer enough to deduplicate HTTP side effects?
+4. Why isn't an idempotent Kafka producer enough to deduplicate downstream gRPC side effects?
 5. How would you transactionally persist the previous point, event inbox key and distance?
 
 ## Exercise

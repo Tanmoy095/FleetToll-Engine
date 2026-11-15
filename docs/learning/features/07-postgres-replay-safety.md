@@ -2,7 +2,7 @@
 
 ## Business problem
 
-Kafka can redeliver an event when an HTTP response is lost, the process exits before committing the offset, or a consumer group rebalances. If the calculator updates a volatile previous point before the HTTP call, a replay may produce zero distance instead of the original movement. If the aggregator accepted the request but the response disappeared, adding the same distance again overstates the invoice total.
+Kafka can redeliver an event when an RPC response is lost, the process exits before committing the offset, or a consumer group rebalances. If the calculator updates a volatile previous point before the RPC, a replay may produce zero distance instead of the original movement. If the aggregator accepted the request but the response disappeared, adding the same distance again overstates the invoice total.
 
 ## Implemented path
 
@@ -30,12 +30,12 @@ The advisory lock covers the read/modify/write sequence for one OBU, even when i
 |---|---|
 | PostgreSQL unavailable before transaction | Consumer returns an error and does not commit Kafka; the event can be retried |
 | Transaction rolls back before commit | Neither inbox result nor next point persists; retry recalculates from the previous committed point |
-| PostgreSQL commits, then HTTP fails | Replay reads the stored distance and retries the aggregate request |
-| Aggregator commits, HTTP response is lost | Replay sends the same event ID; unique ledger row prevents double addition |
+| PostgreSQL commits, then gRPC fails | Replay reads the stored distance and retries the aggregate request |
+| Aggregator commits, gRPC response is lost | Replay sends the same event ID; unique ledger row prevents double addition |
 | Aggregator rejects conflicting event-ID reuse | Consumer does not commit; operator intervention is needed because DLQ is not implemented |
 | `DATABASE_URL` unset | In-memory fallback is used; restart/replay guarantees do not apply |
 
-Kafka offset commit and the PostgreSQL/HTTP operations still do not share a distributed transaction. The guarantee is at-least-once delivery with idempotent database effects.
+Kafka offset commit and the PostgreSQL/gRPC operations still do not share a distributed transaction. The guarantee is at-least-once delivery with idempotent database effects.
 
 ## How to verify
 

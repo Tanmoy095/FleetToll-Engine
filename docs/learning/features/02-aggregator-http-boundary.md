@@ -4,6 +4,8 @@
 
 Distance processing sends accumulated kilometers to the aggregator, and fleet users need invoice totals. The API must reject malformed or unreasonable requests before changing those totals, return consistent HTTP responses, and remain safe when multiple requests arrive concurrently.
 
+**Current status:** this guide documents the retained HTTP adapter for manual use and compatibility. The Kafka consumer now uses generated protobuf/gRPC; see [Feature 08](08-protobuf-grpc-aggregator.md) and ADR-022 for the active internal path.
+
 ## HLD
 
 ```mermaid

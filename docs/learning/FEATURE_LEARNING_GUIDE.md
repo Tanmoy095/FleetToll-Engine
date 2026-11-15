@@ -26,6 +26,10 @@ Latitude and longitude are angles, not planar distances. A one-degree longitude 
 
 The calculation service has no trip expiry, late-event policy, event-time ordering, persistence, or tenant-aware identity. It assumes each incoming point is the next point for that OBU. Kafka replay can therefore repeat state transitions unless the consumer and state persistence gain idempotency. Basic malicious-input probes and race detection passed, but Kafka authentication, device identity binding, tenant authorization, state bounds, infrastructure integration, and external penetration testing remain outstanding.
 
+## Internal protobuf/gRPC aggregation
+
+The current Kafka-to-aggregator call uses the versioned generated contract described in [Feature 08](features/08-protobuf-grpc-aggregator.md). HTTP `/aggregate` and `/invoice` remain for direct inspection. Review the feature guide before editing the wire schema; field numbers are compatibility identifiers. It also includes focused interview questions on error mapping, deadlines, idempotency and transport trade-offs.
+
 # Testing and TDD
 
 ## Haversine distance slice

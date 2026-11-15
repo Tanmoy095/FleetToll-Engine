@@ -107,4 +107,25 @@ Added tests for downstream-success-before-commit, no commit on aggregator failur
 - `GOCACHE=/tmp/fleettoll-go-cache go test ./distance_calculator -run '^TestKafkaConsumer' -count=1` — passed after implementation with loopback access. The fake records commit attempts; HTTP fixtures exercise real client calls.
 - `GOCACHE=/tmp/fleettoll-go-cache make integration-kafka` — after resolving a cancellation race in the integration fixture, passed against the local Compose broker. It includes producer-to-broker read-back and two real consumer records delivered through the real calculation service to a loopback aggregator.
 
-The consumer disables auto-commit and commits only after a successful HTTP response. A downstream failure or invalid record stops the consumer without committing. This avoids silently acknowledging an observed failure but a malformed record can block the partition. A response lost after the aggregator accepted a write can cause duplicate aggregation, and the per-OBU previous point is volatile and is advanced before HTTP succeeds. Therefore the consumer is not crash-safe or exactly-once; durable state, event idempotency and an audited DLQ are outstanding.
+The consumer disables auto-commit and commits only after a successful gRPC response. A downstream failure or invalid record stops the consumer without committing. This avoids silently acknowledging an observed failure but a malformed record can block the partition. A response lost after the aggregator accepted a write can cause a repeated RPC, which the durable event ledger deduplicates. The Kafka offset and PostgreSQL work still do not share one transaction; durable state, bounded retry and an audited DLQ remain necessary for robust operation.
+
+## Internal protobuf/gRPC aggregation
+
+The wire contract and full learning walkthrough are in `features/08-protobuf-grpc-aggregator.md`.
+
+### RED / GREEN evidence
+
+- `TestDialGRPCDoesNotReportUnavailableTargetAsConnected` failed against the lazy `grpc.NewClient` constructor because it returned before making a connection. A context-aware blocking dial made it pass and made the startup deadline meaningful.
+- `TestLoggingMiddlewareDoesNotEmitStorageErrorDetails` failed and showed raw wrapped store errors in the log output. Replacing raw error fields with a boolean failure marker made the regression pass.
+- Adapter tests verify valid replay, large `int64` OBU IDs, validation, conflict/not-found status mapping, oversized message rejection and sanitized storage errors.
+
+### Green and integration evidence
+
+- `go test -race ./...` — passed on 2026-11-16; non-fatal macOS linker warnings were emitted for two test binaries.
+- `go vet ./...` — passed.
+- `make integration-postgres` — passed against PostgreSQL 15, including a generated gRPC client writing and replaying one event through the actual SQL store.
+- `make integration-kafka` — passed against the local broker; the real consumer path uses the gRPC client.
+- `make generate-proto` — completed with no generated-file diff after the final schema change.
+- One-shot 1,000-call PostgreSQL-backed gRPC probe — 1,000 successes, zero errors, p95 319.9 ms. See the performance note for hardware and limitations.
+
+The first test attempts were blocked by the restricted module cache and loopback policy; they were rerun after approved dependency and local-network access. The open security findings are unauthenticated plaintext RPC if exposed beyond loopback and missing context propagation into the current SQL service interfaces. This is not an external penetration test or production readiness claim.

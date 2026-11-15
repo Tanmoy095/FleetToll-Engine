@@ -50,6 +50,14 @@ This serial order is intentional for the current small consumer: later records a
 
 `InvoiceAggregator` validates event ID (nonblank, at most 512 bytes), positive OBU ID, finite nonnegative distance and positive timestamp. `MemoryStore` is the volatile fallback and deduplicates under its mutex. `PostgresStore` inserts into `aggregated_distance_events` with `ON CONFLICT (event_id) DO NOTHING`, then checks that an existing identity has the same OBU and distance; a mismatch returns `ErrEventIDConflict`. Invoice distance is `SUM(distance_km)` filtered by OBU. A B-tree index on `obu_id` supports this lookup. Amount calculation uses `float64` prototype pricing; persisted records are not tenant-scoped.
 
+## Internal protobuf/gRPC boundary
+
+`api/fleettoll/v1/aggregator.proto` defines `AggregatorService.AggregateDistance` and `GetInvoice`. The Kafka consumer sends `event_id`, `obu_id` (`int64`, matching PostgreSQL `BIGINT` capacity), `distance_km` and `event_unix_nano`; the gRPC adapter checks that the OBU ID fits the current Go `int` and maps fields into the existing `types.Distance`. It delegates to the same `Aggregator` interface used by HTTP and does not duplicate business or persistence logic.
+
+The adapter rejects invalid identifiers, non-positive OBU IDs, negative/non-finite distance and non-positive timestamps with `InvalidArgument`. Event identity conflicts map to `AlreadyExists`, absent invoice to `NotFound`, and storage failures to sanitized `Internal`. The gRPC server caps inbound message size at 1 MiB. It binds to `127.0.0.1:3001` by default, while `-grpc-listenaddr` can override the address. Transport credentials are plaintext and there is no authentication; the service must remain local until identity and TLS are implemented.
+
+Generated bindings are committed and reproducible using the pinned plugin versions in `Makefile`. Field numbers are stable wire identifiers: never renumber or reuse them; reserve deleted fields and names. Adding fields is usually wire-compatible, but changing application assumptions still requires compatibility tests. The RPC handler receives a context, but the current domain/store interfaces do not accept one, so cancellation cannot interrupt an in-flight database call yet.
+
 ## Error and cancellation flow
 
 The distance client uses `http.NewRequestWithContext`, a five-second default `http.Client` timeout, and closes every response body. A non-200 response becomes an error. The consumer wraps errors with topic/partition/offset context and exits. SIGINT/SIGTERM cancellation is converted into context cancellation by `signal.NotifyContext`; the consumer's bounded poll observes it and closes the Kafka client.

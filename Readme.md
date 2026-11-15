@@ -13,6 +13,7 @@ I am developing FleetToll to explore a practical logistics and fleet-finance pro
 | Distance calculation | Implemented | Haversine kilometers and per-OBU baseline; volatile fallback remains available when the database is unset |
 | Durable replay-safe processing | Implemented in PostgreSQL mode | Inbox result and trip baseline commit in one transaction; real PostgreSQL tests cover replay after a new service instance |
 | Distance aggregation | Implemented | PostgreSQL event ledger has a unique event ID and sums records for the prototype invoice; duplicate events do not add twice |
+| Internal aggregation RPC | Implemented | Versioned Protocol Buffers contract and gRPC client/server; the Kafka calculator uses gRPC, while HTTP remains for the current demo API |
 | Toll zones and pricing | Planned | PostGIS geometry, tariff versioning and toll assessment are not implemented |
 | Identity and tenant authorization | Planned | OBU ID is currently client-supplied; APIs do not authenticate callers |
 | DLQ and operator replay | Planned | A poison Kafka record can still block its partition |
@@ -27,10 +28,10 @@ flowchart LR
   Receiver -->|Kafka record keyed by OBU| Kafka[(Kafka)]
   Kafka -->|topic:partition:offset| Calculator[Distance calculator]
   Calculator -->|inbox + trip state transaction| DB[(PostgreSQL)]
-  Calculator -->|HTTP distance + event ID| Aggregator[Aggregator]
+  Calculator -->|gRPC distance + event ID| Aggregator[Aggregator]
   Aggregator -->|unique distance ledger| DB
   Aggregator --> Invoice[GET /invoice]
-  Calculator -->|commit after HTTP success| Kafka
+  Calculator -->|commit after gRPC success| Kafka
 ```
 
 ### One telemetry event, end to end
@@ -40,8 +41,8 @@ flowchart LR
 3. The consumer forms a stable event identity from the Kafka topic, partition and offset.
 4. With `DATABASE_URL` configured, the calculator starts a PostgreSQL transaction, serializes updates for that OBU using a transaction-scoped advisory lock, checks the processed-event inbox, calculates Haversine distance from the prior point, and commits the result and next point together.
 5. A replay returns the distance saved for that event and does not advance the vehicle baseline again.
-6. The calculator sends the event and distance to `POST /aggregate`. The aggregator inserts into a ledger with a unique event ID. Same-ID/same-data delivery is a no-op; same-ID/different-data delivery is rejected.
-7. The consumer commits the Kafka offset only after the aggregator returns success. If a response is lost, redelivery reuses the inbox result and the aggregate ledger deduplicates it.
+6. The calculator sends the event and distance through `AggregatorService.AggregateDistance` over gRPC. The aggregator inserts into a ledger with a unique event ID. Same-ID/same-data delivery is a no-op; same-ID/different-data delivery is rejected.
+7. The consumer commits the Kafka offset only after the RPC returns success. If a response is lost, redelivery reuses the inbox result and the aggregate ledger deduplicates it.
 
 This is at-least-once delivery with idempotent database effects. Kafka, PostgreSQL and HTTP do not share one distributed transaction, so the project does **not** claim end-to-end exactly-once processing.
 
@@ -49,12 +50,13 @@ This is at-least-once delivery with idempotent database effects. Kafka, PostgreS
 
 The business direction is a multi-tenant fleet tolling and revenue-assurance platform. The first engineering slice is intentionally smaller: establish a reliable telemetry-to-distance path before adding financial rules. The current invoice endpoint is a prototype total (`10 × distance`) and uses floating point; it is not a real tariff, currency calculation or immutable financial invoice.
 
-HTTP is used for the current request/response boundary because the contract is small and easy to inspect and test. Kafka buffers telemetry and allows replay across service failures. PostgreSQL is the system of record for trip baselines, processed-event identity and aggregate distance when durable mode is enabled. gRPC may make sense for future typed internal APIs or streaming, but it is not currently implemented. PostGIS is deferred until toll-zone geometry and spatial queries exist.
+The internal Kafka-to-aggregator call uses gRPC with a versioned Protocol Buffers contract, generated Go client/server code and explicit RPC status codes. HTTP `/aggregate` and `/invoice` remain as simple demo and inspection endpoints. This keeps browser/curl-friendly access while giving service-to-service calls a typed contract. It adds code generation and schema compatibility responsibilities; gRPC is not assumed to be faster for this workload. Kafka buffers telemetry and allows replay across service failures. PostgreSQL is the system of record for trip baselines, processed-event identity and aggregate distance when durable mode is enabled. PostGIS is deferred until toll-zone geometry and spatial queries exist.
 
 ## Repository layout
 
 ```text
-aggregator/                 HTTP API, invoice service, memory and PostgreSQL stores
+aggregator/                 HTTP API, gRPC RPC adapter, invoice service and stores
+api/fleettoll/v1/           Protobuf source contract and generated Go bindings
 data_receiver/              WebSocket endpoint and Kafka producer
 distance_calculator/        Kafka consumer, Haversine calculation, PostgreSQL inbox/state
 internal/postgres/          Connection pool setup and embedded schema migrations
@@ -84,11 +86,11 @@ export DATABASE_URL='postgres://fleettoll:fleetdev@localhost:15432/fleettoll?ssl
 Then start each service:
 
 ```bash
-go run ./aggregator -listenaddr :3000
+go run ./aggregator -listenaddr :3000 -grpc-listenaddr 127.0.0.1:3001
 ```
 
 ```bash
-KAFKA_BROKERS=localhost:9092 KAFKA_TOPIC=obudata go run ./distance_calculator
+KAFKA_BROKERS=localhost:9092 KAFKA_TOPIC=obudata AGGREGATOR_GRPC_TARGET=127.0.0.1:3001 go run ./distance_calculator
 ```
 
 ```bash
@@ -119,6 +121,8 @@ The first point initializes a baseline and contributes zero kilometers. Later po
 | `KAFKA_TOPIC` | `obudata` | Telemetry topic |
 | `KAFKA_CONSUMER_GROUP` | `fleettoll-distance-calculator` | Calculator consumer group |
 | `DATABASE_URL` | unset | Enables durable calculator and aggregator PostgreSQL mode |
+| `AGGREGATOR_GRPC_TARGET` | `127.0.0.1:3001` | Internal gRPC target used by the distance calculator |
+| Aggregator `-grpc-listenaddr` | `127.0.0.1:3001` | gRPC listen address; keep loopback-only until authentication/TLS exist |
 | `KAFKA_TEST_BROKERS` | `localhost:9092` | Real Kafka integration tests |
 | `DATABASE_TEST_URL` | Compose PostgreSQL DSN | Real PostgreSQL integration tests |
 
@@ -128,11 +132,14 @@ The first point initializes a baseline and contributes zero kilometers. Later po
 GOCACHE=/tmp/fleettoll-go-cache go test ./...
 GOCACHE=/tmp/fleettoll-go-cache go test -race ./...
 GOCACHE=/tmp/fleettoll-go-cache go vet ./...
+GOMODCACHE=/tmp/fleettoll-gomodcache GOCACHE=/tmp/fleettoll-go-cache go test ./aggregator ./distance_calculator/client -run '^(TestGRPCAggregator|TestGRPCClient)' -count=1
 GOCACHE=/tmp/fleettoll-go-cache make integration-kafka
 GOCACHE=/tmp/fleettoll-go-cache make integration-postgres
 ```
 
-The integration targets require the local Compose dependencies. The PostgreSQL tests exercise actual SQL and transaction behavior, not an in-memory substitute.
+The integration targets require the local Compose dependencies. The PostgreSQL tests exercise actual SQL and transaction behavior, not an in-memory substitute. gRPC transport tests open a real loopback TCP listener and run the generated client against the server adapter. `make integration-kafka` now covers the real Kafka consumer through the gRPC boundary.
+
+To regenerate protobuf bindings, install the pinned Go plugins with `make install-proto-tools`, ensure `protoc` is on `PATH`, then run `make generate-proto`. Keep field numbers stable; reserve deleted numbers and names. See [ADR-022](docs/architecture/decisions/ADR-022-internal-grpc-aggregator.md) and the [gRPC learning guide](docs/learning/features/08-protobuf-grpc-aggregator.md).
 
 ### Latest verification
 
@@ -144,6 +151,16 @@ On 2026-11-15, all of these completed successfully on the development machine:
 - `make integration-postgres` — replay, persisted baseline, parallel duplicate writes, event-ID conflict and SQL-shaped input passed against PostgreSQL 15.
 - `KAFKA_TEST_BROKERS=localhost:9092 make integration-kafka` — real Kafka producer and consumer integration passed.
 - Local 1,000-request API probe — final run completed with zero errors; latency and throughput are reported below and in the performance note.
+
+On 2026-11-16, the protobuf/gRPC feature checks also completed:
+
+- Focused real-loopback gRPC transport/client tests — passed.
+- `go test -race ./...` — passed; macOS emitted non-fatal linker `LC_DYSYMTAB` warnings for two test binaries.
+- `go vet ./...` — passed.
+- `make integration-postgres` — passed against local PostgreSQL 15, including a generated gRPC client writing/replaying a real ledger event.
+- `make integration-kafka` — passed against the running local Kafka broker; the consumer now calls the gRPC aggregator.
+- 1,000 concurrent gRPC calls against PostgreSQL — 1,000 succeeded, zero errors, p95 319.9 ms. This is a local one-shot result, not a capacity guarantee; see [`docs/performance/GRPC_AGGREGATOR_LOCAL_LOAD.md`](docs/performance/GRPC_AGGREGATOR_LOCAL_LOAD.md).
+- A local security review found and fixed raw database error details in middleware logs. Unauthenticated plaintext gRPC remains safe only behind the loopback default; do not expose it remotely. See [`docs/security/GRPC_AGGREGATOR_REVIEW.md`](docs/security/GRPC_AGGREGATOR_REVIEW.md).
 
 These checks verify the feature in a local development environment; they are not external penetration-test evidence, a 1,000-WebSocket run, or a production availability/capacity claim.
 
@@ -161,7 +178,7 @@ On 2026-11-15, the final PostgreSQL-backed local run accepted 1,000/1,000 reques
 
 ## Engineering decisions and learning
 
-The current design and trade-offs are documented in [`docs/architecture/HLD.md`](docs/architecture/HLD.md), [`docs/architecture/LLD.md`](docs/architecture/LLD.md), and the ADRs. The inbox/transaction walkthrough is in [`docs/learning/features/07-postgres-replay-safety.md`](docs/learning/features/07-postgres-replay-safety.md). Test evidence and open findings live under [`docs/security/`](docs/security/) and [`docs/IMPLEMENTATION_ROADMAP.md`](docs/IMPLEMENTATION_ROADMAP.md).
+The current design and trade-offs are documented in [`docs/architecture/HLD.md`](docs/architecture/HLD.md), [`docs/architecture/LLD.md`](docs/architecture/LLD.md), and the ADRs. The inbox/transaction walkthrough is in [`docs/learning/features/07-postgres-replay-safety.md`](docs/learning/features/07-postgres-replay-safety.md). The protobuf/gRPC contract and exercises are in the new [Feature 08 guide](docs/learning/features/08-protobuf-grpc-aggregator.md). Test evidence and open findings live under [`docs/security/`](docs/security/) and [`docs/IMPLEMENTATION_ROADMAP.md`](docs/IMPLEMENTATION_ROADMAP.md).
 
 Key concepts to be ready to explain:
 

@@ -1,6 +1,6 @@
 # FleetToll Engine high-level design
 
-**Status:** describes the current prototype as of 2026-11-15. PostgreSQL inbox/trip-state and distance-ledger components are implemented when `DATABASE_URL` is set; other planned components are not implemented.
+**Status:** describes the current prototype as of 2026-11-16. PostgreSQL inbox/trip-state and distance-ledger components are implemented when `DATABASE_URL` is set. The internal calculator-to-aggregator call now uses gRPC; other planned components are not implemented.
 
 ## Business purpose
 
@@ -14,7 +14,7 @@ flowchart LR
   Receiver -->|keyed telemetry record| Kafka[(Kafka)]
   Kafka -->|consumer group| Calculator[Distance calculator]
   Calculator -->|inbox + trip state transaction| DB[(PostgreSQL)]
-  Calculator -->|HTTP distance + event ID| Aggregator[Aggregator API]
+  Calculator -->|gRPC distance + event ID| Aggregator[Aggregator]
   Aggregator -->|unique distance ledger| DB
   Aggregator -->|invoice query| Client[Demo client]
 ```
@@ -25,8 +25,8 @@ flowchart LR
 |---|---|---|---|
 | `data_receiver` | Validate an incoming GPS point and publish it | WebSocket connection handling and Kafka producer | WebSocket in; Kafka out |
 | Kafka | Buffer and distribute telemetry records | Topic partitions and consumer offsets | Keyed event stream |
-| `distance_calculator` | Calculate incremental great-circle distance and return saved result on replay | PostgreSQL `processed_telemetry` and `trip_state` when configured; otherwise memory | Kafka in; HTTP out |
-| `aggregator` | Validate/idempotently store distance events and serve prototype invoice totals | PostgreSQL `aggregated_distance_events` when configured; otherwise memory | HTTP API |
+| `distance_calculator` | Calculate incremental great-circle distance and return saved result on replay | PostgreSQL `processed_telemetry` and `trip_state` when configured; otherwise memory | Kafka in; gRPC out |
+| `aggregator` | Validate/idempotently store distance events and serve prototype invoice totals | PostgreSQL `aggregated_distance_events` when configured; otherwise memory | gRPC internal service; HTTP demo/query API |
 | `obu` | Generate sample device traffic | Simulator process | WebSocket client; current random coordinate generator needs correction |
 
 Tenant and auth services, toll zones, a financial invoice ledger, reconciliation and tracing/metrics are not implemented. PostgreSQL currently stores telemetry processing state and distance events only.
@@ -46,9 +46,9 @@ sequenceDiagram
   K->>C: Deliver record from one partition
   C->>C: Build topic:partition:offset event ID
   C->>DB: Transactionally read inbox, lock OBU state, calculate, save result + next point
-  C->>A: POST distance + event ID
+  C->>A: AggregateDistance RPC (protobuf)
   A->>DB: Insert unique event ledger row
-  A-->>C: HTTP success
+  A-->>C: gRPC success or typed status
   C->>K: Synchronously commit record offset
 ```
 
@@ -59,14 +59,14 @@ If aggregation returns an error, the consumer stops without committing the recor
 - Kafka is the durable event buffer. The producer uses OBU ID as the key; same-key records are assigned to one partition.
 - PostgreSQL mode commits the processed-event result and next OBU coordinate in one transaction. A transaction-scoped advisory lock serializes the read/modify/write for one OBU.
 - The aggregator's event ID primary key makes a distance contribution unique; invoice totals sum the accepted ledger rows.
-- Kafka offset commit, PostgreSQL processing and HTTP aggregation do not share one transaction. This is at-least-once delivery with idempotent database effects, not exactly-once processing or financial billing.
+- Kafka offset commit, PostgreSQL processing and gRPC aggregation do not share one transaction. This is at-least-once delivery with idempotent database effects, not exactly-once processing or financial billing.
 - If `DATABASE_URL` is unset, both services use volatile in-memory stores and restart-safe behavior does not apply.
 
-The next architecture step is to persist event identity and trip state in PostgreSQL, then make the aggregation write idempotent. Tenant, fleet, vehicle, and device records must establish server-side identity before tenant authorization is claimed. PostGIS is planned for toll-zone geometry, but no spatial schema exists yet.
+The internal RPC uses the versioned source contract at `api/fleettoll/v1/aggregator.proto`, with generated Go bindings checked in and a local-only insecure transport. The HTTP endpoints remain for manual inspection. Tenant, fleet, vehicle, and device records must establish server-side identity before tenant authorization is claimed. PostGIS is planned for toll-zone geometry, but no spatial schema exists yet.
 
 ## Scaling and operations
 
-Kafka partitions can distribute different OBU keys across consumer instances. Per-OBU ordering is partition-scoped. PostgreSQL shares state across replicas and the advisory lock protects an OBU during rebalances. The consumer handles one record at a time per instance and downstream HTTP latency applies backpressure.
+Kafka partitions can distribute different OBU keys across consumer instances. Per-OBU ordering is partition-scoped. PostgreSQL shares state across replicas and the advisory lock protects an OBU during rebalances. The consumer handles one record at a time per instance and downstream gRPC latency applies backpressure. No production benchmark establishes a gRPC capacity advantage over HTTP.
 
 The local Compose setup uses a single plaintext Kafka broker and ZooKeeper plus PostgreSQL 15 bound to localhost. It is suitable for local integration checks only. There are no production broker replicas, database backup policy, autoscaling policy, service metrics or traces.
 
@@ -74,6 +74,7 @@ The local Compose setup uses a single plaintext Kafka broker and ZooKeeper plus 
 
 - WebSocket payloads are bounded and validated, but the device supplies its own OBU ID and is not authenticated.
 - The aggregator has no authentication or tenant authorization.
+- The gRPC listener defaults to loopback and uses plaintext credentials; changing the bind address can expose unauthenticated RPCs to a network.
 - Kafka has no TLS/SASL credentials or ACLs in the local environment.
 - Same-origin validation is a browser defense, not device authentication.
 - No TLS termination, rate/connection quotas, credential lifecycle, or audit trail is deployed.
