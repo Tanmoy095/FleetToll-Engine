@@ -127,11 +127,19 @@ func (c *kafkaConsumer) processMessage(ctx context.Context, msg *kafka.Message) 
 	if err := json.Unmarshal(msg.Value, &data); err != nil {
 		return fmt.Errorf("decode telemetry at %s[%d]@%v: %w", topicName(msg.TopicPartition.Topic), msg.TopicPartition.Partition, msg.TopicPartition.Offset, err)
 	}
-	distance, err := c.calcService.CalculateDistance(data)
+	partition := msg.TopicPartition.Partition
+	eventID := fmt.Sprintf("%s:%d:%d", topicName(msg.TopicPartition.Topic), partition, msg.TopicPartition.Offset)
+	distance := 0.0
+	var err error
+	if durable, ok := c.calcService.(EventCalculator); ok {
+		distance, err = durable.CalculateEvent(ctx, eventID, data)
+	} else {
+		distance, err = c.calcService.CalculateDistance(data)
+	}
 	if err != nil {
 		return fmt.Errorf("calculate distance at %s[%d]@%v: %w", topicName(msg.TopicPartition.Topic), msg.TopicPartition.Partition, msg.TopicPartition.Offset, err)
 	}
-	req := types.Distance{Value: distance, Unix: time.Now().UnixNano(), OBUID: data.OBUID}
+	req := types.Distance{EventID: eventID, Value: distance, Unix: time.Now().UnixNano(), OBUID: data.OBUID}
 	if err := c.aggClient.AggregateInvoiceContext(ctx, req); err != nil {
 		return fmt.Errorf("aggregate distance for OBU %d at %s[%d]@%v: %w", data.OBUID, topicName(msg.TopicPartition.Topic), msg.TopicPartition.Partition, msg.TopicPartition.Offset, err)
 	}
