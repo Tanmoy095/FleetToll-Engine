@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package fleettoll.v1;
+
+option go_package = "github.com/Tanmoy095/FleetToll-Engine/api/fleettoll/v1;fleettollv1";
+
+// AggregatorService is the typed internal boundary for distance processing.
+// Field numbers are part of the wire contract and must not be reused.
+service AggregatorService {
+  rpc AggregateDistance(AggregateDistanceRequest) returns (AggregateDistanceResponse);
+  rpc GetInvoice(GetInvoiceRequest) returns (GetInvoiceResponse);
+}
+
+message AggregateDistanceRequest {
+  string event_id = 1;
+  int64 obu_id = 2;
+  double distance_km = 3;
+  int64 event_unix_nano = 4;
+}
+
+message AggregateDistanceResponse {
+  bool accepted = 1;
+}
+
+message GetInvoiceRequest {
+  int64 obu_id = 1;
+}
+
+message GetInvoiceResponse {
+  int64 obu_id = 1;
+  double total_distance_km = 2;
+  double total_amount = 3;
+}
