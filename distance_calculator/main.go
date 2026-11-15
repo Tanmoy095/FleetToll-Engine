@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/Tanmoy095/FleetToll-Engine/distance_calculator/client"
+	"github.com/Tanmoy095/FleetToll-Engine/internal/postgres"
 )
 
 const (
@@ -23,7 +26,19 @@ func main() {
 		err error
 		svc CalculatorServicer
 	)
-	svc = NewCalculatorService()
+	if databaseURL := os.Getenv("DATABASE_URL"); databaseURL != "" {
+		initCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		pool, openErr := postgres.Open(initCtx, databaseURL)
+		cancel()
+		if openErr != nil {
+			log.Fatal(openErr)
+		}
+		defer pool.Close()
+		svc = NewPostgresCalculator(pool)
+	} else {
+		fmt.Println("DATABASE_URL is unset; using volatile in-memory trip state")
+		svc = NewCalculatorService()
+	}
 	svc = NewLogMiddleware(svc)
 
 	// Creating a client to send data to Aggregator
