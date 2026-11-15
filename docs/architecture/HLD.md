@@ -1,10 +1,10 @@
 # FleetToll Engine high-level design
 
-**Status:** describes the current prototype as of 2026-11-15. Planned components are labeled; they are not implemented.
+**Status:** describes the current prototype as of 2026-11-15. PostgreSQL inbox/trip-state and distance-ledger components are implemented when `DATABASE_URL` is set; other planned components are not implemented.
 
 ## Business purpose
 
-FleetToll is being developed toward a multi-tenant fleet tolling and revenue-assurance platform. Its current backend slice accepts vehicle GPS events, computes distance per OBU, and exposes an in-memory invoice total. This slice proves the basic event path and selected reliability boundaries; it is not a durable billing product.
+FleetToll is being developed toward a multi-tenant fleet tolling and revenue-assurance platform. Its current backend slice accepts GPS events, computes distance per OBU, and exposes a prototype invoice total. PostgreSQL mode stores a replay-safe inbox and distance ledger; this is not a durable financial billing product.
 
 ## System context
 
@@ -13,7 +13,9 @@ flowchart LR
   Device[Vehicle device or simulator] -->|WebSocket JSON| Receiver[Data receiver]
   Receiver -->|keyed telemetry record| Kafka[(Kafka)]
   Kafka -->|consumer group| Calculator[Distance calculator]
-  Calculator -->|HTTP distance request| Aggregator[Aggregator API]
+  Calculator -->|inbox + trip state transaction| DB[(PostgreSQL)]
+  Calculator -->|HTTP distance + event ID| Aggregator[Aggregator API]
+  Aggregator -->|unique distance ledger| DB
   Aggregator -->|invoice query| Client[Demo client]
 ```
 
@@ -23,11 +25,11 @@ flowchart LR
 |---|---|---|---|
 | `data_receiver` | Validate an incoming GPS point and publish it | WebSocket connection handling and Kafka producer | WebSocket in; Kafka out |
 | Kafka | Buffer and distribute telemetry records | Topic partitions and consumer offsets | Keyed event stream |
-| `distance_calculator` | Calculate incremental great-circle distance per OBU | In-memory last point per OBU | Kafka in; HTTP out |
-| `aggregator` | Validate and accumulate distances; serve invoice totals | In-memory per-OBU totals | HTTP API |
+| `distance_calculator` | Calculate incremental great-circle distance and return saved result on replay | PostgreSQL `processed_telemetry` and `trip_state` when configured; otherwise memory | Kafka in; HTTP out |
+| `aggregator` | Validate/idempotently store distance events and serve prototype invoice totals | PostgreSQL `aggregated_distance_events` when configured; otherwise memory | HTTP API |
 | `obu` | Generate sample device traffic | Simulator process | WebSocket client; current random coordinate generator needs correction |
 
-There is no database, tenant service, auth service, toll-zone service, invoice ledger, reconciliation service, or tracing/metrics backend in the current system.
+Tenant and auth services, toll zones, a financial invoice ledger, reconciliation and tracing/metrics are not implemented. PostgreSQL currently stores telemetry processing state and distance events only.
 
 ## Event workflow
 
@@ -42,29 +44,31 @@ sequenceDiagram
   R->>R: Validate fields, ranges and frame size
   R->>K: Publish JSON keyed by OBU ID
   K->>C: Deliver record from one partition
-  C->>C: Update process-local point state and calculate Haversine km
-  C->>A: POST distance with bounded HTTP client
-  A->>A: Validate and update process-local total
+  C->>C: Build topic:partition:offset event ID
+  C->>DB: Transactionally read inbox, lock OBU state, calculate, save result + next point
+  C->>A: POST distance + event ID
+  A->>DB: Insert unique event ledger row
   A-->>C: HTTP success
   C->>K: Synchronously commit record offset
 ```
 
-If aggregation returns an error, the consumer stops without committing the record. A malformed record also stops without commit and can block its partition. The failure is visible, but retry/DLQ and operator replay are not yet available.
+If aggregation returns an error, the consumer stops without committing the record. With PostgreSQL configured, replay returns the saved distance and the unique aggregate ledger prevents duplicate totals after an ambiguous HTTP outcome. A malformed record or conflicting event ID can still block its partition because retry/DLQ and operator replay are not implemented.
 
 ## Data ownership and consistency
 
-- Kafka is the only durable component in the current flow. The producer uses the OBU ID as key; same-key records are assigned to the same partition under the default partitioner.
-- The distance calculator updates its in-memory prior point before its HTTP call. A process crash loses this map; a downstream failure may leave it ahead of Kafka's committed offset.
-- The aggregator updates its in-memory total before returning success. A lost HTTP response can make the consumer replay a record that the aggregator already applied.
-- Kafka offset commit and HTTP aggregation are not a shared transaction. The current path is at-least-once in intent, with duplicate and loss windows due to volatile state. It is not exactly-once or financially safe.
+- Kafka is the durable event buffer. The producer uses OBU ID as the key; same-key records are assigned to one partition.
+- PostgreSQL mode commits the processed-event result and next OBU coordinate in one transaction. A transaction-scoped advisory lock serializes the read/modify/write for one OBU.
+- The aggregator's event ID primary key makes a distance contribution unique; invoice totals sum the accepted ledger rows.
+- Kafka offset commit, PostgreSQL processing and HTTP aggregation do not share one transaction. This is at-least-once delivery with idempotent database effects, not exactly-once processing or financial billing.
+- If `DATABASE_URL` is unset, both services use volatile in-memory stores and restart-safe behavior does not apply.
 
 The next architecture step is to persist event identity and trip state in PostgreSQL, then make the aggregation write idempotent. Tenant, fleet, vehicle, and device records must establish server-side identity before tenant authorization is claimed. PostGIS is planned for toll-zone geometry, but no spatial schema exists yet.
 
 ## Scaling and operations
 
-Kafka partitions can distribute different OBU keys across consumer instances. Per-OBU ordering is partition-scoped. The current state map is process-local, so rebalancing one OBU to another consumer loses its baseline. The consumer handles one record at a time per instance and downstream HTTP latency applies backpressure.
+Kafka partitions can distribute different OBU keys across consumer instances. Per-OBU ordering is partition-scoped. PostgreSQL shares state across replicas and the advisory lock protects an OBU during rebalances. The consumer handles one record at a time per instance and downstream HTTP latency applies backpressure.
 
-The local Compose setup uses a single plaintext Kafka broker and ZooKeeper. It is suitable for local integration checks only. There are no health-based startup dependencies, production broker replication, Postgres pool, autoscaling policy, service metrics, traces, or measured throughput results.
+The local Compose setup uses a single plaintext Kafka broker and ZooKeeper plus PostgreSQL 15 bound to localhost. It is suitable for local integration checks only. There are no production broker replicas, database backup policy, autoscaling policy, service metrics or traces.
 
 ## Security boundaries
 
@@ -78,9 +82,8 @@ These are open findings in `docs/security/`; no external penetration test is cla
 
 ## Intended evolution
 
-1. PostgreSQL migrations and repositories for tenant-scoped fleets/vehicles and durable trip state.
-2. Authenticated device and user identity, tenant authorization, audit events, and rate limits.
-3. Transactional inbox/idempotency plus bounded retry, DLQ, and replay operations.
+1. Authenticated device and user identity, tenant authorization, audit events and rate limits.
+2. Bounded retry, DLQ and operator replay.
 4. PostGIS toll polygons, tariff versions, toll assessment, integer-minor-unit ledger and immutable invoices.
 5. Reconciliation workflows, OpenTelemetry, Prometheus/Grafana, SLOs, end-to-end tests, and measured load.
 

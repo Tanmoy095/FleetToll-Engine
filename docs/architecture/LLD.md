@@ -1,6 +1,6 @@
 # FleetToll Engine low-level design
 
-**Status:** documents the present Go implementation. Future database and auth contracts are not specified here as if they already existed.
+**Status:** documents the current Go implementation, including optional PostgreSQL persistence when `DATABASE_URL` is set. Future auth and tenant contracts are not described as if implemented.
 
 ## Package map
 
@@ -8,9 +8,9 @@
 |---|---|---|
 | `types` | `OBUData`, `Distance`, `Invoice` | JSON contracts shared by current services |
 | `data_receiver` | `DataReceiver`, `DataProducer`, `KafkaProducer` | Decode and validate WebSocket frames; publish telemetry |
-| `distance_calculator` | `CalculatorServicer`, `CalculatorService`, `kafkaConsumer`, `kafkaMessageReader` | Track process-local OBU points, calculate distances, poll/commit Kafka |
+| `distance_calculator` | `CalculatorServicer`, `CalculatorService`, `PostgresCalculator`, `kafkaConsumer`, `kafkaMessageReader` | Calculate distance, persist trip baseline and inbox when configured, poll/commit Kafka |
 | `distance_calculator/client` | `Client` | Send distance JSON to the aggregator with context and timeout |
-| `aggregator` | `Aggregator`, `InvoiceAggregator`, `MemoryStore` | Validate business input, accumulate totals, serve invoice queries |
+| `aggregator` | `Aggregator`, `InvoiceAggregator`, `MemoryStore`, `PostgresStore` | Validate business input, idempotently persist totals, serve invoice queries |
 
 The module path is `github.com/Tanmoy095/FleetToll-Engine`. The application uses composition and small interfaces at the receiver producer and Kafka consumer seams so unit tests can verify behavior without replacing real infrastructure integration tests.
 
@@ -25,10 +25,10 @@ Telemetry event:
 Distance event sent to `POST /aggregate`:
 
 ```json
-{"value":1.25,"obuID":12345,"unix":1794772800000000000}
+{"eventID":"obudata:2:173","value":1.25,"obuID":12345,"unix":1794772800000000000}
 ```
 
-Invoice query: `GET /invoice?obu=12345` returns `obuID`, `totalDistance`, and `totalAmount`. These contracts lack immutable event IDs, tenant IDs, currency, schema versioning and authenticated identity; they are prototype contracts, not finalized public APIs.
+Invoice query: `GET /invoice?obu=12345` returns `obuID`, `totalDistance`, and `totalAmount`. Distance events include Kafka identity for replay safety. Telemetry still lacks authenticated device identity, tenant ID and schema version; invoices lack currency and financial-ledger semantics. These are prototype contracts, not finalized public APIs.
 
 ## Receiver implementation
 
@@ -38,9 +38,9 @@ Invoice query: `GET /invoice?obu=12345` returns `obuID`, `totalDistance`, and `t
 
 ## Distance consumer implementation
 
-`CalculatorService` stores `map[int]coordinate` behind one `sync.Mutex`. A single lock covers lookup and update so concurrent calculation calls cannot interleave a check/update pair. It validates before locking and applies the Haversine formula using mean Earth radius `6371.0088` km.
+Without `DATABASE_URL`, `CalculatorService` stores `map[int]coordinate` behind one `sync.Mutex`; this is explicitly volatile local mode. In PostgreSQL mode the consumer detects `EventCalculator` and calls `PostgresCalculator.CalculateEvent(ctx, eventID, data)`. Its transaction acquires `pg_advisory_xact_lock(OBUID)`, checks `processed_telemetry`, reads `trip_state`, calculates using mean Earth radius `6371.0088` km, and writes the event result and next coordinate together. A duplicate event ID returns the saved distance.
 
-`kafkaMessageReader` abstracts only `ReadMessage`, `CommitMessage`, `SubscribeTopics`, and `Close`. Production passes Confluent's Kafka consumer. `NewKafkaConsumer` reads brokers and consumer group from environment, turns auto-commit off, subscribes, and uses earliest reset for a new group. `Start(ctx)` owns cleanup. `run(ctx)` polls for up to 250 ms, calls `processMessage`, then commits only after the aggregator reports success. It stops on observed processing or commit failures.
+`kafkaMessageReader` abstracts only `ReadMessage`, `CommitMessage`, `SubscribeTopics`, and `Close`. `processMessage` derives `eventID` from Kafka topic, partition and offset so a redelivery has a stable key. Production passes Confluent's Kafka consumer. `NewKafkaConsumer` reads brokers and consumer group from environment, turns auto-commit off, subscribes, and uses earliest reset for a new group. `Start(ctx)` owns cleanup. `run(ctx)` polls for up to 250 ms, calls `processMessage`, then commits only after the aggregator reports success. It stops on observed processing or commit failures.
 
 This serial order is intentional for the current small consumer: later records are not processed after an earlier failure. Parallel processing would need per-partition sequencing and careful offset tracking so a later completed record cannot advance a partition past an earlier unfinished one.
 
@@ -48,7 +48,7 @@ This serial order is intentional for the current small consumer: later records a
 
 `newHTTPHandler` mounts `POST /aggregate` and `GET /invoice`. The POST boundary checks method, JSON media type, a 1 MiB maximum body, one strict JSON value, and positive OBU ID / nonnegative finite distance / positive timestamp. The invoice route requires exactly one positive `obu` parameter and maps `ErrInvoiceNotFound` to 404.
 
-`InvoiceAggregator` is the service boundary and `MemoryStore` holds totals protected by an `RWMutex`. The write path is process-local and not durable, transactional, tenant-scoped, or idempotent. Amount calculation uses `float64` and prototype pricing.
+`InvoiceAggregator` validates event ID (nonblank, at most 512 bytes), positive OBU ID, finite nonnegative distance and positive timestamp. `MemoryStore` is the volatile fallback and deduplicates under its mutex. `PostgresStore` inserts into `aggregated_distance_events` with `ON CONFLICT (event_id) DO NOTHING`, then checks that an existing identity has the same OBU and distance; a mismatch returns `ErrEventIDConflict`. Invoice distance is `SUM(distance_km)` filtered by OBU. A B-tree index on `obu_id` supports this lookup. Amount calculation uses `float64` prototype pricing; persisted records are not tenant-scoped.
 
 ## Error and cancellation flow
 
@@ -59,13 +59,20 @@ Current edge behavior:
 - Broker poll timeout is expected and retries the loop.
 - Other broker read errors stop the process.
 - Malformed JSON and invalid telemetry stop without offset commit; there is no DLQ yet.
-- HTTP failure stops without offset commit, but in-memory calculation state has already advanced.
-- HTTP success followed by a commit error can cause replay; the aggregator cannot detect a duplicate.
+- HTTP failure stops without offset commit. PostgreSQL mode replays the saved distance; the aggregate ledger handles an ambiguous HTTP outcome idempotently.
+- HTTP success followed by a commit error can cause replay; event identity lets both durable stores detect the repeat.
 - Cancellation can cancel an in-flight HTTP request; the event remains uncommitted, and the request outcome may be ambiguous.
 
-## Future relational model boundary
+## Implemented relational schema and future model boundary
 
-No SQL schema is implemented. Before adding tables, the design must settle tenant key ownership and device identity. A durable model will need at minimum:
+`internal/postgres.Open` applies embedded migration files in one transaction each, serializes concurrent startup with a transaction-scoped advisory lock, and records applied filenames in `schema_migrations`. `internal/postgres/migrations/001_distance_events.sql` creates:
+
+- `trip_state` keyed by OBU ID, with validated latitude and longitude.
+- `processed_telemetry` keyed by event ID, storing its calculated distance.
+- `aggregated_distance_events` keyed by event ID, storing the distance ledger row.
+- A B-tree index on `aggregated_distance_events(obu_id)` for invoice aggregation.
+
+The two services share this schema in the local demo. It has no tenant foreign keys, retention policy, partitions, financial amount columns or immutable invoice records. Before expanding the relational model, tenant ownership and authenticated device identity need to be designed.
 
 - `tenants` and tenant-scoped `fleets`/`vehicles`, with unique constraints matching business identity.
 - Durable `telemetry_events`/inbox identity so replay can be detected.
