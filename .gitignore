@@ -1,1 +1,11 @@
 bin
+.env
+.env.*
+!.env.example
+
+# Internal source-comparison notes are for private development, not portfolio publication.
+/docs/traceability/
+
+# Legacy scratch notes are retained locally but replaced by maintained guides.
+/data_receiver/text.txt
+/distance_calculator/client/text.txt

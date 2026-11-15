@@ -1,396 +1,190 @@
 # FleetToll Engine
 
-This repository is a production-oriented proof-of-concept for a truck toll calculation pipeline implemented in Go. It's written as a microservice suite demonstrating event-driven streaming (WebSocket -> Kafka -> consumer -> aggregator) with clear separation of concerns and straightforward control flow — suitable for a live demo and a technical interview walkthrough.
+FleetToll Engine is a Go backend portfolio project exploring reliable telemetry processing for commercial fleets. Vehicles send GPS points; the backend validates and buffers them, calculates per-vehicle travel distance, and aggregates that distance into a simple invoice view.
 
-## Project overview (diagram)
+The current code is an **early-stage prototype**, not a production tolling or billing system. Its strongest implemented areas are bounded WebSocket ingestion, keyed Kafka publishing, geodesic distance calculation, explicit Kafka offset commits, and defensive HTTP contracts. Persistence, authenticated identity, tenant isolation, financial-grade idempotency, toll-zone pricing, and operational observability are not yet implemented.
 
-![Project Overview](https://private-user-images.githubusercontent.com/96974600/298181962-18fa76f9-5a29-4b81-a333-5f0c8ee360f7.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzAzNjc5NTIsIm5iZiI6MTc3MDM2NzY1MiwicGF0aCI6Ii85Njk3NDYwMC8yOTgxODE5NjItMThmYTc2ZjktNWEyOS00YjgxLWEzMzMtNWYwYzhlZTM2MGY3LnBuZz9YLUFtei1BbGdvcml0aG09QVdTNC1ITUFDLVNIQTI1NiZYLUFtei1DcmVkZW50aWFsPUFLSUFWQ09EWUxTQTUzUFFLNFpBJTJGMjAyNjAyMDYlMkZ1cy1lYXN0LTElMkZzMyUyRmF3czRfcmVxdWVzdCZYLUFtei1EYXRlPTIwMjYwMjA2VDA4NDczMlomWC1BbXotRXhwaXJlcz0zMDAmWC1BbXotU2lnbmF0dXJlPTQ4N2YyMThiMjJjNjZmNTVjMGMxNjJhMzAxYWM1YjQ4ZjE0YWM0YmEwODExODBhODgxMTU1NGUwNDk0MTYwMzQmWC1BbXotU2lnbmVkSGVhZGVycz1ob3N0In0._Yu6rELU93bQ29u8RSk-ZqQdx8wVRIduFd8Yg_MKd6Q)
+## Product problem
 
-> The diagram shows OBUs connecting via WebSocket to `data_receiver`, messages flowing into Kafka, processed by `distance_calculator`, and aggregated by `aggregator` (with an isolated `invoice_calculator` service and DB).
+Fleet operators need a trustworthy record of where vehicles travel and which toll charges should be attributed to each vehicle. A useful backend must handle frequent device events, isolate vehicle state, survive dependency failures, and eventually provide auditable trip and billing records.
 
----
+This project is being built toward a multi-tenant fleet tolling and revenue-assurance platform. The current increment demonstrates the telemetry-to-distance-to-invoice prototype; it does not yet solve the full business problem.
 
-## Table of contents
+## Current architecture
 
-- Overview
-- Architecture & Data Flow
-- Components (what each service does)
-- API specification & example payloads
-- Environment variables (recommended)
-- Local development & run steps
-- Example `docker-compose` (local Kafka + Zookeeper)
-- Testing & validation
-- Design trade-offs, limitations & next steps
-- Files to review (quick map)
-
----
-
-## Overview
-
-Core idea: OBUs (on-board units) send periodic GPS points via WebSocket. Points are published to Kafka. A distance-calculator consumer reads the stream, computes incremental distances, and forwards distances to an aggregator service which accumulates and produces invoices.
-
-This demo prioritizes correctness and understandability. Production hardening (persistence, metrics, auth, and stronger delivery semantics) is described below as immediate next steps.
-
----
-
-## Architecture & Data Flow
-
-1. OBU (WebSocket client) -> connects to `data_receiver` WebSocket (`/ws`) and sends JSON `OBUData`.
-2. `data_receiver` publishes received messages to Kafka topic `obudata`.
-3. `distance_calculator` consumes `obudata`, computes the Euclidean distance between consecutive points for the same `obuID`, and forwards `Distance` payloads to the `aggregator` by HTTP POST to `/aggregate`.
-4. `aggregator` stores the distances (current implementation: in-memory) and exposes `/invoice?obu=<id>` which returns an `Invoice` (simple pricing = basePrice \* totalDistance).
-
-Notes:
-
-- Kafka provides reliable buffering and replay for reprocessing.
-- Replace Euclidean with Haversine for accurate geodesic distances when using real lat/long data.
-
----
-
-## Components
-
-- data_receiver: WebSocket server that accepts `OBUData` and produces to Kafka.
-- distance_calculator: Kafka consumer that calculates distances and forwards them to aggregator.
-- aggregator: HTTP API that aggregates distances and exposes invoices.
-- obu: simulator that connects to the `data_receiver` WebSocket and streams synthetic points for demo/testing.
-- types: shared type definitions used across services (`OBUData`, `Distance`, `Invoice`).
-
----
-
-## Detailed flow (main.go simulation & service responsibilities)
-
-In `obu/main.go` (and referenced `main.go` across services) we simulate an OBU: a small client that sits in a truck and sends GPS coordinates at a fixed interval via WebSocket. The primary flow implemented in code is:
-
-- OBU (simulator) sends JSON GPS messages to `data_receiver` over WebSocket.
-- `data_receiver` receives messages and produces them to Kafka (`obudata` topic).
-- `distance_calculator` consumes OBU messages from Kafka, computes incremental distances (distance between the last point and the current point for each `obuID`) and POSTs `Distance` objects to `aggregator` (`/aggregate`).
-- `aggregator` aggregates distances per `obuID` and exposes an API (`/invoice?obu=<id>`) that returns an `Invoice` object.
-
-Invoice calculator service: the `invoice_calculator` is intentionally isolated as a standalone microservice (not tightly coupled to `aggregator`). This allows the calculator to be used directly for "what-if" queries (e.g., "How much would it cost to travel from A to B?") without invoking the full pipeline. The `aggregator` calls `invoice_calculator` to compute amounts and persists invoices in the DB.
-
-Note: distance calculation in `distance_calculator/service.go` is Euclidean for demo purposes — replace with Haversine for accurate geodesic distances.
-
----
-
-## Project dependencies & install commands
-
-Install required Go packages and tools used in the project:
-
-- WebSocket (Gorilla):
-
-```bash
-go get github.com/gorilla/websocket
+```mermaid
+flowchart LR
+  OBU[Vehicle simulator or device] -->|WebSocket JSON| R[Data receiver :30000]
+  R -->|Kafka record keyed by OBU ID| K[(Kafka topic: obudata)]
+  K -->|explicitly committed after HTTP success| D[Distance calculator]
+  D -->|Haversine distance, km| A[Aggregator :3000]
+  A -->|in-memory invoice totals| Q[GET /invoice]
 ```
 
-- Kafka Go client (Confluent):
+### Event flow
 
-```bash
-go get github.com/confluentinc/confluent-kafka-go/v2/kafka
+1. A device opens `ws://localhost:30000/ws` and sends one JSON telemetry point per text frame.
+2. The receiver requires a positive OBU ID and finite latitude/longitude in geographic ranges. It limits each frame to 4 KiB and publishes validated telemetry to Kafka using the OBU ID as the record key.
+3. Kafka preserves order for records with the same key within a partition. It does not establish global ordering across partitions.
+4. The distance calculator keeps the most recent point for each OBU in a mutex-protected in-memory map and computes a Haversine distance in kilometers.
+5. It posts the result to the aggregator. Kafka auto-commit is disabled; the consumer commits a record only after it observes a successful HTTP response.
+6. The aggregator validates input and adds distance to a concurrent in-memory store. `GET /invoice?obu=<id>` returns the accumulated distance and a prototype amount.
+
+## Implemented and verified
+
+| Area | Current behavior | Evidence |
+|---|---|---|
+| WebSocket ingestion | Per-connection handling, bounded frame size, strict JSON fields, coordinate validation, same-origin browser check, reduced sensitive logging | Loopback WebSocket tests, including concurrent clients and invalid/oversized input |
+| Kafka producer | Configurable broker/topic, OBU-keyed records, idempotent producer mode, `acks=all`, delivery result handling | Producer unit tests and real-broker integration |
+| Distance calculation | Per-OBU state, Haversine kilometers, input validation, mutex protection | Unit and race tests |
+| Kafka consumer | Auto-commit disabled; commit after successful downstream response; cancellation-aware polling and client close | Commit-order unit tests and real Kafka-to-HTTP integration |
+| Aggregator API | Method/content-type validation, strict bounded JSON, input checks, typed invoice not-found, synchronized in-memory store | HTTP integration tests and concurrency race coverage |
+| Aggregator client | JSON contract, five-second default HTTP timeout, context propagation, response-body cleanup | Loopback HTTP contract and timeout tests |
+
+## Known engineering limitations
+
+- Calculator previous-point state and invoice totals are lost on process restart and are not shared between replicas.
+- Distance state changes before the aggregator request succeeds. A failed request followed by replay can calculate from an already-advanced in-memory point.
+- The aggregator write and Kafka offset commit are separate operations. If the aggregator accepts a write but the response is lost, replay can add the same distance twice. This is **not exactly-once processing**.
+- A malformed or invalid Kafka event stops the consumer without committing. This avoids silently discarding it, but can block progress on that partition; retry, DLQ, alerting, and replay tooling are still needed.
+- The aggregator API and WebSocket device identity are unauthenticated. An OBU ID supplied by a client is not proof of device ownership.
+- The local Kafka Compose listener is plaintext and has no SASL, TLS, or ACL setup. It is for local development only.
+- Invoice amount uses floating-point prototype pricing. Currency, integer minor units, immutable invoice evidence, and ledger semantics are not implemented.
+- No PostgreSQL/PostGIS, authentication, tenant authorization, toll geofencing, distributed tracing, Prometheus/Grafana, full E2E suite, or measured 1,000-user/device workload exists yet.
+
+Current security assessments and the implementation sequence are in [`docs/security/`](docs/security/) and [`docs/IMPLEMENTATION_ROADMAP.md`](docs/IMPLEMENTATION_ROADMAP.md). They describe open findings as well as completed work.
+
+## Repository layout
+
+```text
+aggregator/                 HTTP API, invoice service, in-memory store
+data_receiver/              WebSocket endpoint and Kafka producer
+distance_calculator/        Kafka consumer, distance service, HTTP client
+obu/                        Basic telemetry simulator (known limitations below)
+types/                      Shared telemetry, distance, invoice types
+docs/architecture/          Accepted engineering decisions (ADRs)
+docs/learning/              Feature guides, TDD notes, learning path
+docs/security/              Local security reviews and remaining risks
 ```
 
-- Logger (logrus):
+## Run locally
+
+Requirements: Go 1.21+, Docker Compose, and a local network that allows loopback HTTP/WebSocket tests. Docker Compose starts the single-node Kafka development dependency; it does not start the Go services.
+
+Start Kafka and Zookeeper:
 
 ```bash
-go get github.com/sirupsen/logrus
+docker compose up -d
 ```
 
-- Prometheus Go client:
+The Go services read process environment variables directly; they do not load `.env` files. The committed `.env.example` documents the Kafka settings, but export them in each terminal if you need non-default values.
+
+Start the aggregator:
 
 ```bash
-go get github.com/prometheus/client_golang/prometheus
+go run ./aggregator -listenaddr :3000
 ```
 
-gRPC & Protobuf (optional / future):
+Start the distance calculator in another terminal:
 
 ```bash
-go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
-go get google.golang.org/protobuf
-go get google.golang.org/grpc
-go get google.golang.org/genproto
+KAFKA_BROKERS=localhost:9092 KAFKA_TOPIC=obudata go run ./distance_calculator
 ```
 
-Install `protoc` (protocol buffer compiler):
+Start the WebSocket receiver in another terminal:
 
 ```bash
-# Linux (example)
-sudo apt install -y protobuf-compiler
-
-# macOS
-brew install protobuf
+KAFKA_BROKERS=localhost:9092 KAFKA_TOPIC=obudata go run ./data_receiver
 ```
 
-Kafka (local) using Docker Compose:
+The current `obu` simulator is not a reliable demo client yet: it can generate out-of-range latitude values and zero OBU IDs, both correctly rejected by the receiver. Use a corrected simulator or a WebSocket client with valid points before expecting invoice totals.
 
-```bash
-docker-compose up -d
-```
-
-Prometheus docker commands (examples):
-
-```bash
-docker run -d --name prometheus -p 127.0.0.1:9090:9090 -v /path/to/prometheus.yml:/etc/prometheus/prometheus.yml prom/prometheus
-
-# alternative (example path from development)
-docker run -d --name prometheus -p 127.0.0.1:9090:9090 -v /home/you/project/.config/prometheus.yml:/etc/prometheus/prometheus.yml prom/prometheus
-```
-
-Access Prometheus at: http://localhost:9090
-
----
-
-## API specification & example payloads
-
-1. WebSocket (data_receiver)
-
-- Endpoint: `ws://127.0.0.1:30000/ws`
-- Payload (JSON) — OBU -> server
+Example telemetry frame:
 
 ```json
-{
-  "obuID": 12345,
-  "lat": 51.218,
-  "long": 4.421
-}
+{"obuID":12345,"lat":23.7806,"long":90.4074}
 ```
 
-2. Aggregator HTTP POST (from distance_calculator)
-
-- Endpoint: `POST http://127.0.0.1:3000/aggregate`
-- Payload (JSON) — Distance
-
-```json
-{
-  "value": 12.34,
-  "obuID": 12345,
-  "unix": 1670000000
-}
-```
-
-3. Aggregator HTTP GET (client)
-
-- Endpoint: `GET http://127.0.0.1:3000/invoice?obu=<id>`
-- Response (JSON) — Invoice
-
-```json
-{
-  "obuID": 12345,
-  "totalDistance": 123.45,
-  "totalAmount": 1234.5
-}
-```
-
-Behavioral notes:
-
-- `distance_calculator` currently uses Euclidean distance (demo). For real-world lat/long use Haversine.
-- Aggregator multiplies `basePrice * totalDistance` to compute `totalAmount` (see `aggregator/service.go`).
-
----
-
-## Environment variables (recommended)
-
-Replace hard-coded constants with these env vars for runtime configuration. Create a `.env.example` at repo root documenting values.
-
-- `KAFKA_BROKERS` (default: `localhost:9092`)
-- `KAFKA_TOPIC` (default: `obudata`)
-- `WS_PORT` (default: `30000`) — data_receiver
-- `AGGREGATOR_ADDR` (default: `:3000`)
-- `AGGREGATOR_ENDPOINT` (full URL used by `distance_calculator` to POST distances)
-- `BASE_PRICE` (default: `10.0`)
-
-Suggested `.env.example`:
-
-```
-KAFKA_BROKERS=localhost:9092
-KAFKA_TOPIC=obudata
-WS_PORT=30000
-AGGREGATOR_ADDR=:3000
-AGGREGATOR_ENDPOINT=http://127.0.0.1:3000/aggregate
-BASE_PRICE=10.0
-```
-
----
-
-## Local development & run steps
-
-1. Ensure Go and modules:
+After sending at least two valid points for the same OBU, query the prototype invoice:
 
 ```bash
-go version # use 1.21+
-go mod tidy
+curl "http://127.0.0.1:3000/invoice?obu=12345"
 ```
 
-2. Start Kafka & Zookeeper (use docker-compose snippet below or your own).
+First point initializes the baseline and contributes zero kilometers. Subsequent points contribute the great-circle distance from the preceding point for that OBU.
 
-3. Create Kafka topic (if required):
+## Configuration
+
+| Variable | Default | Used by |
+|---|---|---|
+| `KAFKA_BROKERS` | `localhost:9092` | Receiver producer and distance consumer |
+| `KAFKA_TOPIC` | `obudata` | Receiver and executable configuration |
+| `KAFKA_CONSUMER_GROUP` | `fleettoll-distance-calculator` | Distance consumer |
+| `KAFKA_TEST_BROKERS` | `localhost:9092` | Real Kafka integration tests only |
+
+Aggregator defaults to `:3000`; receiver listens on `:30000`; the distance-calculator's aggregator URL is currently `http://127.0.0.1:3000/aggregate`.
+
+## Test and verification
+
+Run unit and loopback integration suites:
 
 ```bash
-kafka-topics.sh --create --topic obudata --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1
+GOCACHE=/tmp/fleettoll-go-cache go test ./...
+GOCACHE=/tmp/fleettoll-go-cache go test -race ./...
+GOCACHE=/tmp/fleettoll-go-cache go vet ./...
 ```
 
-4. Run services in separate terminals:
+Run the named real-broker tests. They create temporary topics and require the local Compose broker:
 
 ```bash
-# aggregator
-cd aggregator && go run main.go
-
-# distance_calculator
-cd ../distance_calculator && go run main.go
-
-# data_receiver
-cd ../data_receiver && go run main.go
-
-# optionally run the OBU simulator
-cd ../obu && go run main.go
+GOCACHE=/tmp/fleettoll-go-cache make integration-kafka
 ```
 
-5. Verify by querying the invoice endpoint:
+Focused examples:
 
 ```bash
-curl "http://127.0.0.1:3000/invoice?obu=<some-obu-id>"
+GOCACHE=/tmp/fleettoll-go-cache make tdd PKG=./distance_calculator TEST=TestCalculatorServiceCalculatesHaversineKilometers
+GOCACHE=/tmp/fleettoll-go-cache go test ./aggregator -run '^TestAggregatorHTTP' -count=1
+GOCACHE=/tmp/fleettoll-go-cache go test ./distance_calculator -run '^TestKafkaConsumer' -count=1
 ```
 
----
+### Latest verified results
 
-## How to run (Make targets & examples)
+On 2026-11-15, the following commands completed successfully on the development machine:
 
-Run Kafka/Zookeeper first (via `docker-compose up -d`), then you can run services using the provided `Makefile` targets or by running `go run` directly.
+- `GOCACHE=/tmp/fleettoll-go-cache go test -race ./...` — all Go packages passed. The macOS linker emitted non-fatal `LC_DYSYMTAB` warnings for two test binaries.
+- `GOCACHE=/tmp/fleettoll-go-cache go vet ./...` — passed.
+- `GOCACHE=/tmp/fleettoll-go-cache make integration-kafka` — producer and consumer integration passed against the local Compose Kafka broker. The consumer test delivered two real Kafka events through distance calculation to a loopback HTTP aggregator.
+- Focused aggregator, WebSocket, producer, consumer, and distance-calculator HTTP-client tests passed during implementation.
 
-Available `make` targets (see `Makefile`):
+These are development checks, not evidence of production availability, security, or scale. No 1,000-user or 1,000-device load run has been performed.
 
-```bash
-make receiver   # builds and runs data_receiver
-make obu        # builds and runs the OBU simulator
-make calculator # builds and runs distance_calculator
-```
+## Engineering decisions and learning path
 
-Note: there is no `make agg` target in the Makefile by default. To run the aggregator use:
+The current system design is in [`docs/architecture/HLD.md`](docs/architecture/HLD.md) and [`docs/architecture/LLD.md`](docs/architecture/LLD.md). Accepted decisions are recorded as ADRs under [`docs/architecture/decisions/`](docs/architecture/decisions/). Feature guides under [`docs/learning/features/`](docs/learning/features/) explain implementation flow, tests, failure cases, and interview questions. Security reviews under [`docs/security/`](docs/security/) document tested scenarios and unresolved findings. The next hands-on checkpoint is [`docs/learning/NEXT_ENGINEERING_EXERCISES.md`](docs/learning/NEXT_ENGINEERING_EXERCISES.md).
 
-```bash
-cd aggregator && go run main.go
-```
+Current decisions worth being able to explain:
 
-Example endpoints you can test with Thunder Client / curl:
+1. Why Haversine is more appropriate than subtracting latitude/longitude values as if they were kilometers.
+2. Why OBU ID is a Kafka partition key and what ordering that gives.
+3. Why producer idempotence does not deduplicate a repeated business event.
+4. Why consumer offsets are committed after an observed HTTP success, and how the separate HTTP/Kafka operations still create a duplicate window.
+5. Why in-memory trip state means the current result is neither durable nor safe to scale horizontally.
 
-- GET invoice (calculates invoice for an OBU ID):
+## Current roadmap
 
-```bash
-GET http://localhost:3000/invoice?obu=6428921451518044973
-```
+1. Complete a hands-on review of Kafka delivery semantics and the in-memory state failure window.
+2. Add PostgreSQL/PostGIS migrations and integration-tested durable trip state.
+3. Add tenant, fleet, vehicle, device identity and authenticated authorization.
+4. Add idempotency/inbox, retry, DLQ, replay, and recovery behavior.
+5. Add toll zones, pricing, ledger, immutable invoices, and reconciliation.
+6. Add OpenTelemetry, metrics, dashboards, SLOs, and operational alerts.
+7. Run threat-oriented security checks, end-to-end scenarios, and measured API/device load workloads.
 
-Sample response:
+See the roadmap document for evidence and ordering dependencies.
 
-```json
-{
-  "obuID": 6428921451518044973,
-  "totalDistance": 35.86001233283358,
-  "totalAmount": 112.95903884842576
-}
-```
+## Interview preparation
 
-- POST aggregate (used by distance_calculator to send distances; can be used manually):
+Use the code and test reports to explain the current trade-offs precisely. Be clear that this prototype has no durable database, auth, tenant authorization, or production load evidence. A strong walkthrough follows one record through the WebSocket, Kafka key, consumer commit boundary, Haversine state, and aggregator, then explains what could fail and what the next durable design must change.
 
-```bash
-POST http://localhost:3000/aggregate
-
-Request body:
-{
-	"value": 20.12,
-	"obuID": 1838,
-	"unix": 73378
-}
-```
-
-Server log example on `/aggregate`:
-
-```
-HTTP Transport running at port :3000...
-INFO[0003] aggregating distance         distance=20.12 obuid=1838 unix=73378
-INFO[0003] AggregateDistance            err="<nil>" took="47.03µs"
-```
-
----
-
-## Project status
-
-Note: This project is currently in development. Work was paused for a short period (personal scheduling). Key items remaining: persistence for aggregator, env-based configuration, metrics, and Dockerfiles for each service.
-
-## Example docker-compose (local Kafka + Zookeeper)
-
-Add this minimal compose for demos (single-node Kafka; not production):
-
-```yaml
-version: '3.8'
-services:
-	zookeeper:
-		image: wurstmeister/zookeeper:3.4.6
-		ports:
-			- 2181:2181
-	kafka:
-		image: wurstmeister/kafka:2.12-2.2.1
-		ports:
-			- 9092:9092
-		environment:
-			KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-			KAFKA_ADVERTISED_HOST_NAME: kafka
-			KAFKA_CREATE_TOPICS: "obudata:1:1"
-		depends_on:
-			- zookeeper
-```
-
-Start with:
-
-```bash
-docker-compose up -d
-```
-
----
-
-## Testing & validation
-
-- Unit tests: add `*_test.go` files and run `go test ./...`.
-- Integration test plan (recommended):
-  1.  Spin up Kafka and services via docker-compose.
-  2.  Run `obu` simulator for a short duration.
-  3.  Assert that `/invoice` returns increased `totalDistance` for known OBU IDs.
-- Edge cases: duplicate messages, out-of-order timestamps, consumer restarts and replay.
-
----
-
-## Design trade-offs, limitations & next steps
-
-Points to discuss in interviews:
-
-- Accuracy vs simplicity: Euclidean distance vs Haversine for geodesic accuracy.
-- Durability: aggregator uses in-memory storage; swap to Postgres/Timescale for production.
-- Delivery semantics: current at-least-once Kafka consumer; adopt idempotency keys or transactional producers for exactly-once behavior.
-- Observability: add Prometheus metrics, structured logs, and distributed tracing.
-- Security: secure WebSocket and Kafka traffic with TLS and add auth to HTTP endpoints.
-
-Roadmap (prioritized):
-
-1. Persist aggregator data to Postgres/Timescale and add migrations.
-2. Add env-based configuration and `.env.example` (recommended next task).
-3. Add health/readiness endpoints, retries, and backoff strategies.
-4. Add metrics and Grafana dashboards.
-5. Dockerize services and provide CI integration.
-
----
-
-## Files to review (quick map)
-
-- Aggregator: [aggregator/main.go](aggregator/main.go), [aggregator/service.go](aggregator/service.go), [aggregator/store.go](aggregator/store.go)
-- Data receiver: [data_receiver/main.go](data_receiver/main.go), [data_receiver/producer.go](data_receiver/producer.go)
-- Distance calculator: [distance_calculator/main.go](distance_calculator/main.go), [distance_calculator/service.go](distance_calculator/service.go), [distance_calculator/consumer.go](distance_calculator/consumer.go)
-- OBU simulator: [obu/main.go](obu/main.go)
-- Types: [types/types.go](types/types.go)
-- Project manifest: [go.mod](go.mod)
-
----
-
-## How to present this in an interview
-
-- Start with the high-level flow and why Kafka introduces useful guarantees (replay, decoupling).
-- Point to code that shows practical skills: producer/consumer wiring, simple service boundaries, and portability of `types` package.
-- Explain trade-offs and the concrete steps you'd make to productionize the system.
-- Offer a 2–3 minute live demo using the `obu` simulator and the aggregator `/invoice` endpoint.
+This portfolio should reflect work and concepts you can personally explain and demonstrate. Use the learning exercises in the feature guides to build that understanding before presenting a design as your own engineering judgment.

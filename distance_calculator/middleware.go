@@ -3,7 +3,7 @@ package main
 import (
 	"time"
 
-	"github.com/Tanmoy095/Toll-Calculator.git/types"
+	"github.com/Tanmoy095/FleetToll-Engine/types"
 	"github.com/sirupsen/logrus"
 )
 

@@ -1,4 +1,4 @@
-module github.com/Tanmoy095/Toll-Calculator.git
+module github.com/Tanmoy095/FleetToll-Engine
 
 go 1.21.4
 

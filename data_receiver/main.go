@@ -1,104 +1,160 @@
-// main.go - Entry point for the WebSocket server
-
 package main
 
 import (
-	"fmt"
-	"log"
+	"bytes"
+	"encoding/json"
+	"errors"
+	"io"
+	"math"
 	"net/http"
+	"net/url"
+	"strings"
+	"time"
 
-	"github.com/Tanmoy095/Toll-Calculator.git/types"
+	"github.com/Tanmoy095/FleetToll-Engine/types"
 	"github.com/gorilla/websocket"
+	"github.com/sirupsen/logrus"
 )
 
-// The main function initializes the WebSocket server and listens for connections.
+const maxOBUMessageBytes = 4096
+
 func main() {
-	// Create a new DataReceiver instance
 	recv, err := NewDataReceiver()
 	if err != nil {
-		log.Fatal(err)
+		logrus.Fatal(err)
 	}
-
-	// Register WebSocket handler
-	http.HandleFunc("/ws", recv.handleWS)
-
-	// Start the HTTP server on port 30000
-	http.ListenAndServe(":30000", nil)
+	server := &http.Server{
+		Addr:              ":30000",
+		Handler:           newWebSocketHandler(recv),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	logrus.Fatal(server.ListenAndServe())
 }
 
-// DataReceiver is responsible for receiving WebSocket messages and producing them to Kafka.
+func newWebSocketHandler(receiver *DataReceiver) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", receiver.handleWS)
+	return mux
+}
+
+// DataReceiver handles each WebSocket connection in its request goroutine.
+// The producer is shared; the socket and decoder state are connection-local.
 type DataReceiver struct {
-	msgch chan types.OBUData // Channel to buffer incoming OBU data
-	conn  *websocket.Conn    // WebSocket connection instance
-	prod  DataProducer       // Producer interface for sending data to Kafka
+	prod DataProducer
 }
 
-// NewDataReceiver initializes a DataReceiver with a Kafka producer.
 func NewDataReceiver() (*DataReceiver, error) {
-	var (
-		p          DataProducer
-		err        error
-		kafkaTopic = "obudata" // Kafka topic to send data
-	)
-
-	// Create a new Kafka producer instance
-	p, err = NewKafkaProducer(kafkaTopic)
+	producer, err := NewKafkaProducer(kafkaTopicFromEnv())
 	if err != nil {
 		return nil, err
 	}
-
-	// Wrap producer with logging middleware
-	p = NewLogMiddleware(p)
-
-	return &DataReceiver{
-		msgch: make(chan types.OBUData, 128), // Buffered channel for message handling
-		prod:  p,                             // Assign producer
-	}, nil
+	return newDataReceiver(NewLogMiddleware(producer)), nil
 }
 
-// produceData sends the received OBUData to Kafka using the producer.
+func newDataReceiver(producer DataProducer) *DataReceiver {
+	return &DataReceiver{prod: producer}
+}
+
 func (dr *DataReceiver) produceData(data types.OBUData) error {
 	return dr.prod.ProduceData(data)
 }
 
-// handleWS upgrades an HTTP request to a WebSocket connection and starts listening for messages.
 func (dr *DataReceiver) handleWS(w http.ResponseWriter, r *http.Request) {
-	// Upgrade HTTP connection to WebSocket
-	u := websocket.Upgrader{
+	upgrader := websocket.Upgrader{
 		ReadBufferSize:  1028,
 		WriteBufferSize: 1028,
+		CheckOrigin:     checkWebSocketOrigin,
 	}
-
-	// Upgrade to WebSocket connection
-	conn, err := u.Upgrade(w, r, nil)
+	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Fatal(err)
+		return
 	}
-	dr.conn = conn // Store connection in DataReceiver
-
-	// Start a goroutine to continuously read messages
-	go dr.wsReceiveLoop()
-}
-
-// wsReceiveLoop continuously listens for messages from WebSocket clients.
-func (dr *DataReceiver) wsReceiveLoop() {
-	fmt.Println("New OBU client connected!")
+	defer conn.Close()
+	conn.SetReadLimit(maxOBUMessageBytes)
 
 	for {
-		var data types.OBUData
-
-		// Read and parse incoming JSON message
-		if err := dr.conn.ReadJSON(&data); err != nil {
-			log.Println("read error:", err)
-			continue
+		messageType, payload, err := conn.ReadMessage()
+		if err != nil {
+			var closeErr *websocket.CloseError
+			if errors.As(err, &closeErr) && closeErr.Code != websocket.CloseNormalClosure && closeErr.Code != websocket.CloseGoingAway {
+				logrus.WithError(err).Debug("WebSocket read ended")
+			}
+			return
+		}
+		if messageType != websocket.TextMessage {
+			writeWebSocketClose(conn, websocket.CloseUnsupportedData, "text JSON messages are required")
+			return
 		}
 
-		// Log received message
-		fmt.Println("Received message:", data)
-
-		// Send data to Kafka producer
+		data, err := decodeOBUData(payload)
+		if err != nil {
+			writeWebSocketClose(conn, websocket.CloseInvalidFramePayloadData, "invalid telemetry payload")
+			return
+		}
+		if err := validateOBUData(data); err != nil {
+			writeWebSocketClose(conn, websocket.ClosePolicyViolation, "invalid telemetry values")
+			return
+		}
 		if err := dr.produceData(data); err != nil {
-			fmt.Println("Kafka produce error:", err)
+			logrus.WithError(err).Error("could not publish telemetry")
+			writeWebSocketClose(conn, websocket.CloseInternalServerErr, "telemetry temporarily unavailable")
+			return
 		}
+		logrus.Debug("telemetry accepted")
 	}
+}
+
+func decodeOBUData(payload []byte) (types.OBUData, error) {
+	var input struct {
+		OBUID     *int     `json:"obuID"`
+		Latitude  *float64 `json:"lat"`
+		Longitude *float64 `json:"long"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		return types.OBUData{}, err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return types.OBUData{}, errors.New("multiple JSON values")
+		}
+		return types.OBUData{}, err
+	}
+	if input.OBUID == nil || input.Latitude == nil || input.Longitude == nil {
+		return types.OBUData{}, errors.New("obuID, lat and long are required")
+	}
+	return types.OBUData{OBUID: *input.OBUID, Latitude: *input.Latitude, Longitude: *input.Longitude}, nil
+}
+
+func validateOBUData(data types.OBUData) error {
+	if data.OBUID <= 0 {
+		return errors.New("OBU ID must be positive")
+	}
+	if math.IsNaN(data.Latitude) || math.IsInf(data.Latitude, 0) || data.Latitude < -90 || data.Latitude > 90 {
+		return errors.New("latitude is outside [-90, 90]")
+	}
+	if math.IsNaN(data.Longitude) || math.IsInf(data.Longitude, 0) || data.Longitude < -180 || data.Longitude > 180 {
+		return errors.New("longitude is outside [-180, 180]")
+	}
+	return nil
+}
+
+func checkWebSocketOrigin(r *http.Request) bool {
+	originValue := r.Header.Get("Origin")
+	if originValue == "" {
+		return true
+	}
+	origin, err := url.Parse(originValue)
+	if err != nil || origin.Host == "" || !strings.EqualFold(origin.Host, r.Host) {
+		return false
+	}
+	return (r.TLS == nil && strings.EqualFold(origin.Scheme, "http")) ||
+		(r.TLS != nil && strings.EqualFold(origin.Scheme, "https"))
+}
+
+func writeWebSocketClose(conn *websocket.Conn, code int, reason string) {
+	deadline := time.Now().Add(time.Second)
+	_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), deadline)
 }

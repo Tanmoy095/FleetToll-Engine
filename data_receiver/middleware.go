@@ -5,7 +5,7 @@ package main
 import (
 	"time"
 
-	"github.com/Tanmoy095/Toll-Calculator.git/types"
+	"github.com/Tanmoy095/FleetToll-Engine/types"
 	"github.com/sirupsen/logrus"
 )
 
@@ -25,10 +25,7 @@ func NewLogMiddleware(next DataProducer) *LogMiddleware {
 func (l *LogMiddleware) ProduceData(data types.OBUData) error {
 	defer func(start time.Time) {
 		logrus.WithFields(logrus.Fields{
-			"obuID": data.OBUID,
-			"lat":   data.Latitude,
-			"long":  data.Longitude,
-			"took":  time.Since(start), // Time taken to process message
+			"took": time.Since(start),
 		}).Info("Producing to Kafka")
 	}(time.Now())
 

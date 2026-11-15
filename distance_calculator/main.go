@@ -1,17 +1,24 @@
 package main
 
 import (
+	"context"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 
-	"github.com/Tanmoy095/Toll-Calculator.git/distance_calculator/client"
+	"github.com/Tanmoy095/FleetToll-Engine/distance_calculator/client"
 )
 
 const (
-	kafkaTopic         = "obudata"
 	aggregatorEndpoint = "http://127.0.0.1:3000/aggregate"
 )
 
 func main() {
+	topic := os.Getenv("KAFKA_TOPIC")
+	if topic == "" {
+		topic = "obudata"
+	}
 	var (
 		err error
 		svc CalculatorServicer
@@ -22,12 +29,15 @@ func main() {
 	// Creating a client to send data to Aggregator
 	aggregatorClient := client.NewClient(aggregatorEndpoint)
 
-	kafkaConsumer, err := NewKafkaConsumer(kafkaTopic, svc, aggregatorClient)
+	kafkaConsumer, err := NewKafkaConsumer(topic, svc, aggregatorClient)
 
 	if err != nil {
 		log.Fatal(err)
 
 	}
-	kafkaConsumer.Start()
-
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := kafkaConsumer.Start(ctx); err != nil {
+		log.Fatal(err)
+	}
 }

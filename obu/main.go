@@ -6,7 +6,7 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/Tanmoy095/Toll-Calculator.git/types" // Import custom package for OBUData struct
+	"github.com/Tanmoy095/FleetToll-Engine/types" // Shared telemetry contract.
 	"github.com/gorilla/websocket"
 )
 

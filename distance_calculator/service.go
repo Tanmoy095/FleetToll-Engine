@@ -1,10 +1,14 @@
 package main
 
 import (
+	"fmt"
 	"math"
+	"sync"
 
-	"github.com/Tanmoy095/Toll-Calculator.git/types"
+	"github.com/Tanmoy095/FleetToll-Engine/types"
 )
+
+const earthRadiusKilometers = 6371.0088
 
 type CalculatorServicer interface {
 	// Add any necessary dependencies here
@@ -12,25 +16,52 @@ type CalculatorServicer interface {
 }
 
 type CalculatorService struct {
-	// Add any necessary dependencies here
-	prevPoint []float64
+	mu         sync.Mutex
+	prevPoints map[int]coordinate
+}
+
+type coordinate struct {
+	latitude  float64
+	longitude float64
 }
 
 func NewCalculatorService() CalculatorServicer {
-	return &CalculatorService{}
+	return &CalculatorService{prevPoints: make(map[int]coordinate)}
 }
 
 func (s *CalculatorService) CalculateDistance(data types.OBUData) (float64, error) {
-	distance := 0.0
-
-	if len(s.prevPoint) > 0 {
-		distance = calculate_Distance(s.prevPoint[0], s.prevPoint[1], data.Latitude, data.Longitude)
-
+	if data.OBUID <= 0 {
+		return 0, fmt.Errorf("OBU ID must be positive")
 	}
-	s.prevPoint = []float64{data.Latitude, data.Longitude}
-	return distance, nil
+	if math.IsNaN(data.Latitude) || math.IsInf(data.Latitude, 0) || data.Latitude < -90 || data.Latitude > 90 {
+		return 0, fmt.Errorf("latitude %v is outside valid range [-90, 90]", data.Latitude)
+	}
+	if math.IsNaN(data.Longitude) || math.IsInf(data.Longitude, 0) || data.Longitude < -180 || data.Longitude > 180 {
+		return 0, fmt.Errorf("longitude %v is outside valid range [-180, 180]", data.Longitude)
+	}
+
+	current := coordinate{latitude: data.Latitude, longitude: data.Longitude}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	previous, exists := s.prevPoints[data.OBUID]
+	s.prevPoints[data.OBUID] = current
+	if !exists {
+		return 0, nil
+	}
+	return haversineDistance(previous, current), nil
 }
 
-func calculate_Distance(x1, y1, x2, y2 float64) float64 {
-	return math.Sqrt(math.Pow(x2-x1, 2) + math.Pow(y2-y1, 2))
+func haversineDistance(from, to coordinate) float64 {
+	toRadians := math.Pi / 180
+	lat1 := from.latitude * toRadians
+	lat2 := to.latitude * toRadians
+	deltaLat := (to.latitude - from.latitude) * toRadians
+	deltaLon := (to.longitude - from.longitude) * toRadians
+
+	a := math.Sin(deltaLat/2)*math.Sin(deltaLat/2) +
+		math.Cos(lat1)*math.Cos(lat2)*math.Sin(deltaLon/2)*math.Sin(deltaLon/2)
+	// Floating-point rounding can move a just outside its mathematical [0, 1] range.
+	a = math.Max(0, math.Min(1, a))
+	return 2 * earthRadiusKilometers * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
 }
