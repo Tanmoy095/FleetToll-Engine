@@ -1,5 +1,19 @@
-version: "3"
 services:
+  postgres:
+    image: postgres:15
+    container_name: fleettoll-postgres
+    ports:
+      - "127.0.0.1:15432:5432"
+    environment:
+      POSTGRES_USER: fleettoll
+      POSTGRES_PASSWORD: fleetdev
+      POSTGRES_DB: fleettoll
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fleettoll -d fleettoll"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   zookeeper:
     image: confluentinc/cp-zookeeper
     container_name: zookeeper
