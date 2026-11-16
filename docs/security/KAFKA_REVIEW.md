@@ -1,6 +1,6 @@
 # Kafka telemetry producer security review
 
-Date: 2026-11-15. Scope: receiver producer configuration, keyed record format and local Compose broker integration. This is not a complete Kafka penetration test.
+Original review date: 2026-11-15. Status rechecked: 2026-11-17. Scope: receiver producer configuration, keyed record format and local Compose broker integration. This is not a complete Kafka penetration test.
 
 ## Tested
 
@@ -22,18 +22,18 @@ Date: 2026-11-15. Scope: receiver producer configuration, keyed record format an
 - Regression test/retest: pending deployment-level security test.
 - Remaining risk: complete topic spoofing/observation while this configuration is used beyond local development.
 
-### KAFKA-SEC-002 — key identity is client-supplied
+### KAFKA-SEC-002 — broker payload identity remains trusted
 
-- Severity: High until device authentication is implemented
+- Severity: Medium; high if the broker is reachable by untrusted producers
 - Affected component: WebSocket receiver and producer record key.
 - Attack: a client claims another positive OBU ID; the forged ID determines the Kafka partition key and downstream vehicle association.
-- Evidence: current WebSocket JSON includes `obuID`; no device credential or registry maps the connection to an authorized vehicle.
-- Reproduction: connect without credentials and send a valid payload using an arbitrary positive ID; the receiver produces the record.
-- Fix: pending authenticated device identity; derive record key from verified server-side device registration, not payload.
-- Regression test/retest: pending identity feature.
-- Remaining risk: cross-vehicle data contamination and billing manipulation.
+- Evidence: the WebSocket ingress now authenticates device credentials, checks its OBU allowlist and derives tenant ID. Kafka itself has no ACL and will accept records from any network-reachable producer.
+- Reproduction: publish directly to the unauthenticated local Kafka topic with a forged tenant/OBU payload.
+- Fix: prototype WebSocket authentication and OBU scope checks are implemented. Add Kafka TLS/SASL/ACLs so only the receiver and calculator can access authorized topics.
+- Regression test/retest: receiver auth tests pass; direct-broker ACL enforcement remains untested and unimplemented.
+- Remaining risk: a direct broker writer can spoof tenant identity or poison a partition.
 
-The producer idempotence setting is not an authentication or business deduplication control. No external scanner, broker ACL attack test, or producer load test was run. The one-message integration test is functional evidence only.
+The producer idempotence setting is not a broker authentication or business deduplication control. Device credentials protect the WebSocket ingress only; they do not protect Kafka from direct broker clients. No external scanner, broker ACL attack test, or producer load test was run. The one-message integration test is functional evidence only.
 
 ## Consumer processing assessment
 
@@ -52,14 +52,14 @@ Scope: `distance_calculator/consumer.go`, focused unit tests, and the tagged rea
 - Retest: unit test is included in the focused consumer suite; do not interpret as a DLQ or recovery test.
 - Remaining risk: partition-wide availability loss until operator intervention; a restart alone does not heal it.
 
-### KAFKA-SEC-004 — ambiguous HTTP outcome permits duplicate aggregation
+### KAFKA-SEC-004 — ambiguous gRPC outcome and replay safety
 
-- Severity: High for financial correctness until idempotency exists
-- Affected component: Kafka consumer to aggregator HTTP boundary.
+- Severity: Medium in PostgreSQL mode; High if financial events are processed in volatile mode
+- Affected component: Kafka consumer to authenticated aggregator gRPC boundary.
 - Attack/failure scenario: aggregator persists a distance, but the response is lost or the consumer is canceled before observing it. Kafka offset remains uncommitted and replay submits the same distance again.
-- Evidence: HTTP request and Kafka offset commit are separate operations; aggregator has no event-id deduplication. The Haversine state and aggregator totals are in-memory only.
-- Reproduction: no deterministic fault-injection test yet; the duplicate window follows directly from commit-after-HTTP ordering and the lack of an idempotency key.
-- Root cause: no durable event identity/inbox and no idempotent aggregation API.
-- Fix: pending durable trip/invoice persistence and an event ID that is transactionally deduplicated at the write boundary.
-- Regression test/retest: pending; current tests prove commit is withheld on observed HTTP failure, not that an accepted-but-unacknowledged request is safe.
-- Remaining risk: distance totals can duplicate or be lost across process restart. End-to-end exactly-once is not claimed.
+- Evidence: gRPC result and Kafka offset commit are separate operations. PostgreSQL mode persists tenant-scoped inbox/trip state and a `(tenant_id,event_id)` aggregate ledger; memory mode remains volatile.
+- Reproduction: no deterministic fault-injection test yet; the RPC/offset commit window follows from separate systems. A durable tenant/event key makes repeated database writes idempotent.
+- Root cause: there is no distributed transaction spanning Kafka and PostgreSQL/gRPC.
+- Mitigation: durable tenant-scoped inbox and event ledger make database effects idempotent; replay still remains at-least-once.
+- Regression evidence: PostgreSQL integration verifies replay and conflicting event IDs.
+- Remaining risk: volatile mode is not restart-safe, and no injected lost-response Kafka integration ran on the 2026-11-17 revision. End-to-end exactly-once is not claimed.

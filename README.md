@@ -24,13 +24,13 @@ I am developing FleetToll to explore a practical logistics and fleet-finance pro
 
 ```mermaid
 flowchart LR
-  Device[Vehicle device / simulator] -->|WebSocket JSON| Receiver[Receiver]
+  Device[Vehicle device + credential] -->|WebSocket JSON + bearer auth| Receiver[Receiver]
   Receiver -->|Kafka record keyed by tenant/OBU| Kafka[(Kafka)]
   Kafka -->|topic:partition:offset| Calculator[Distance calculator]
   Calculator -->|inbox + trip state transaction| DB[(PostgreSQL)]
   Calculator -->|gRPC distance + event ID| Aggregator[Aggregator]
-  Aggregator -->|unique distance ledger| DB
-  Aggregator --> Invoice[GET /invoice]
+  Aggregator -->|tenant + event unique ledger| DB
+  Aggregator -->|tenant-authenticated| Invoice[GET /invoice]
   Calculator -->|commit after gRPC success| Kafka
 ```
 
@@ -38,13 +38,13 @@ flowchart LR
 
 1. A device sends a JSON GPS point to `ws://localhost:30000/ws`.
 2. The receiver authenticates a device token, checks the OBU allowlist and coordinate ranges, caps each frame at 4 KiB, and publishes with `tenantID:OBUID` as the Kafka key. Kafka keeps a tenant/OBU key's records in one partition; it does not provide global ordering.
-3. The consumer forms a stable event identity from the Kafka topic, partition and offset.
+3. The consumer forms a stable event identity from the Kafka topic, partition and offset; legacy messages without a tenant ID are temporarily mapped to tenant 1.
 4. With `DATABASE_URL` configured, the calculator starts a PostgreSQL transaction, serializes updates for that OBU using a transaction-scoped tenant/OBU advisory lock, checks the tenant-scoped processed-event inbox, calculates Haversine distance from the prior point, and commits the result and next point together.
 5. Tenant identity comes from a device bearer credential, never the telemetry frame; calculator state is keyed by tenant and OBU. A replay returns the distance saved for that tenant event and does not advance the vehicle baseline again.
-6. The calculator sends the event and distance through `AggregatorService.AggregateDistance` over gRPC. The aggregator inserts into a ledger with a unique event ID. Same-ID/same-data delivery is a no-op; same-ID/different-data delivery is rejected.
+6. The calculator sends the event and distance through `AggregatorService.AggregateDistance` over gRPC. The aggregator inserts into a tenant-scoped ledger with a unique `(tenant_id,event_id)` key. Same-ID/same-data delivery within a tenant is a no-op; conflicting reuse is rejected, while separate tenants may use the same event ID.
 7. The consumer commits the Kafka offset only after the RPC returns success. If a response is lost, redelivery reuses the inbox result and the aggregate ledger deduplicates it.
 
-This is at-least-once delivery with idempotent database effects. Kafka, PostgreSQL and HTTP do not share one distributed transaction, so the project does **not** claim end-to-end exactly-once processing.
+This is at-least-once delivery with idempotent database effects. Kafka, PostgreSQL and gRPC do not share one distributed transaction, so the project does **not** claim end-to-end exactly-once processing.
 
 ## Business and technical scope
 
@@ -148,9 +148,9 @@ The integration targets require the local Compose dependencies. The PostgreSQL t
 
 To regenerate protobuf bindings, install the pinned Go plugins with `make install-proto-tools`, ensure `protoc` is on `PATH`, then run `make generate-proto`. Keep field numbers stable; reserve deleted numbers and names. See [ADR-022](docs/architecture/decisions/ADR-022-internal-grpc-aggregator.md) and the [gRPC learning guide](docs/learning/features/08-protobuf-grpc-aggregator.md).
 
-### Latest verification
+### Historical verification (2026-11-15)
 
-On 2026-11-15, all of these completed successfully on the development machine:
+The following checks completed successfully on the development machine at that earlier revision:
 
 - `GOCACHE=/tmp/fleettoll-go-cache go test ./...` — all Go packages passed.
 - `GOCACHE=/tmp/fleettoll-go-cache go test -race ./...` — all packages passed; macOS emitted non-fatal linker `LC_DYSYMTAB` warnings for test binaries.
@@ -159,7 +159,7 @@ On 2026-11-15, all of these completed successfully on the development machine:
 - `KAFKA_TEST_BROKERS=localhost:9092 make integration-kafka` — real Kafka producer and consumer integration passed.
 - Local 1,000-request API probe — final run completed with zero errors; latency and throughput are reported below and in the performance note.
 
-On 2026-11-16, the protobuf/gRPC feature checks also completed:
+Historical verification on 2026-11-16, before tenant authentication was added, included:
 
 - Focused real-loopback gRPC transport/client tests — passed.
 - `go test -race ./...` — passed; macOS emitted non-fatal linker `LC_DYSYMTAB` warnings for two test binaries.
@@ -167,7 +167,15 @@ On 2026-11-16, the protobuf/gRPC feature checks also completed:
 - `make integration-postgres` — passed against local PostgreSQL 15, including a generated gRPC client writing/replaying a real ledger event.
 - `make integration-kafka` — passed against the running local Kafka broker; the consumer now calls the gRPC aggregator.
 - 1,000 concurrent gRPC calls against PostgreSQL — 1,000 succeeded, zero errors, p95 319.9 ms. This is a local one-shot result, not a capacity guarantee; see [`docs/performance/GRPC_AGGREGATOR_LOCAL_LOAD.md`](docs/performance/GRPC_AGGREGATOR_LOCAL_LOAD.md).
-- A local security review found and fixed raw database error details in middleware logs. Unauthenticated plaintext gRPC remains safe only behind the loopback default; do not expose it remotely. See [`docs/security/GRPC_AGGREGATOR_REVIEW.md`](docs/security/GRPC_AGGREGATOR_REVIEW.md).
+- That revision used unauthenticated plaintext gRPC; the 2026-11-17 tenant-auth increment added a shared service bearer token. Plaintext transport and shared-token limits remain; see [`docs/security/GRPC_AGGREGATOR_REVIEW.md`](docs/security/GRPC_AGGREGATOR_REVIEW.md).
+
+### Latest verification (2026-11-17)
+
+- `go test ./...`, `go test -race ./...`, and `go vet ./...` passed.
+- PostgreSQL integration passed twice against a temporary PostgreSQL 15 cluster, including tenant migration/backfill, tenant validation, replay and same-ID cross-tenant isolation.
+- Kafka integration was unavailable because no broker was listening; prior Kafka results are historical and predate tenant-key/auth changes.
+- Authenticated 1,000-call gRPC probe passed with zero errors against the in-memory store only. It is not a PostgreSQL load result; see [the probe report](docs/performance/GRPC_TENANT_AUTH_MEMORY_LOAD.md).
+- Security review was an adversarial self-review, not an independent audit.
 
 These checks verify the feature in a local development environment; they are not external penetration-test evidence, a 1,000-WebSocket run, or a production availability/capacity claim.
 
@@ -185,14 +193,14 @@ On 2026-11-15, the final PostgreSQL-backed local run accepted 1,000/1,000 reques
 
 ## Engineering decisions and learning
 
-The current design and trade-offs are documented in [`docs/architecture/HLD.md`](docs/architecture/HLD.md), [`docs/architecture/LLD.md`](docs/architecture/LLD.md), and the ADRs. The inbox/transaction walkthrough is in [`docs/learning/features/07-postgres-replay-safety.md`](docs/learning/features/07-postgres-replay-safety.md). The protobuf/gRPC contract and exercises are in the new [Feature 08 guide](docs/learning/features/08-protobuf-grpc-aggregator.md). Test evidence and open findings live under [`docs/security/`](docs/security/) and [`docs/IMPLEMENTATION_ROADMAP.md`](docs/IMPLEMENTATION_ROADMAP.md).
+The [documentation index](docs/README.md) links the current design, security reviews and learning path. The current design, security limits and trade-offs are documented in [`docs/architecture/HLD.md`](docs/architecture/HLD.md), [`docs/architecture/LLD.md`](docs/architecture/LLD.md), and the ADRs. The inbox/transaction walkthrough is in [`docs/learning/features/07-postgres-replay-safety.md`](docs/learning/features/07-postgres-replay-safety.md). The protobuf/gRPC contract and exercises are in [Feature 08](docs/learning/features/08-protobuf-grpc-aggregator.md); tenant authorization and composite-key decisions are in [Feature 09](docs/learning/features/09-tenant-isolation.md). Test evidence and open findings live under [`docs/security/`](docs/security/) and [`docs/IMPLEMENTATION_ROADMAP.md`](docs/IMPLEMENTATION_ROADMAP.md).
 
 Key concepts to be ready to explain:
 
 - Kafka producer idempotence handles producer retries; it does not by itself deduplicate a business event after consumer replay.
-- The inbox row and per-OBU baseline must commit in one PostgreSQL transaction or replay can lose or double-count distance.
-- A unique event key makes the aggregate write safe to repeat after an ambiguous HTTP response.
-- An advisory lock serializes updates for one OBU while allowing different OBUs to proceed concurrently.
+- The tenant-scoped inbox row and per-tenant/OBU baseline must commit in one PostgreSQL transaction or replay can lose or double-count distance.
+- A unique `(tenant_id,event_id)` key makes the aggregate write safe to repeat after an ambiguous gRPC response.
+- A tenant-qualified advisory lock serializes updates for one tenant/OBU while allowing other tenant/vehicle pairs to proceed concurrently.
 - The database transaction and Kafka offset commit are separate, so the honest guarantee is at-least-once delivery plus idempotent effects.
 
 ## Roadmap
@@ -210,4 +218,4 @@ The roadmap is a plan, not a completion claim. Each item needs implementation ev
 
 Implemented code and focused tests now cover credential-derived tenant identity, device OBU allowlists, authenticated internal gRPC/aggregate HTTP, tenant-scoped in-memory and PostgreSQL queries, tenant-qualified Kafka keys, and the `002_tenant_scope.sql` migration. Added HTTP regression coverage proving identical OBU and event IDs in two tenants remain isolated. Legacy gRPC requests without `tenant_id` and old Kafka records without `tenantID` map to tenant 1 for migration compatibility. Treat that compatibility path as trusted local ingress; remove it before accepting untrusted producers.
 
-Verification in this environment: full unit suite, race detector, `go vet`, and real PostgreSQL integration passed against a temporary local PostgreSQL cluster; the Kafka broker was unavailable, so Kafka integration remains to be rerun. A fresh in-memory gRPC load result is recorded separately; no PostgreSQL load result is claimed for this increment. Existing 2026-11-16 results above describe the prior revision, not this one. See [ADR-023](docs/architecture/decisions/ADR-023-tenant-isolation-and-auth.md), [tenant security review](docs/security/TENANT_ISOLATION_REVIEW.md), and [learning exercise 09](docs/learning/features/09-tenant-isolation.md).
+Verification on 2026-11-17: `go test ./...`, `go test -race ./...`, and `go vet ./...` passed. PostgreSQL integration tests passed against a temporary local PostgreSQL cluster, including tenant migration/backfill, tenant validation, replay and same-ID cross-tenant isolation; the PostgreSQL suite was run twice. Kafka integration was not run because no broker was listening. An authenticated 1,000-call gRPC probe passed with zero errors against the in-memory store only (27,898 req/s, p95 34.4 ms); see [the probe report](docs/performance/GRPC_TENANT_AUTH_MEMORY_LOAD.md). The security check was an adversarial self-review, not an independent audit. Earlier 2026-11-16 PostgreSQL/Kafka performance and integration measurements describe the prior revision and are not evidence for tenant-authenticated performance. See [ADR-023](docs/architecture/decisions/ADR-023-tenant-isolation-and-auth.md), [tenant security review](docs/security/TENANT_ISOLATION_REVIEW.md), and [learning exercise 09](docs/learning/features/09-tenant-isolation.md).

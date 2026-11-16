@@ -24,4 +24,4 @@
 
 ## Verification status
 
-Focused auth, receiver, aggregator HTTP/gRPC and calculator tests passed. This environment had no available Docker daemon and no PostgreSQL listener, so the new migration and real SQL cross-tenant tests have not been verified here. Do not mark that real database gate passed until `make integration-postgres` completes locally. Kafka integration and full race/vet/load checks also need to be rerun on the feature revision before a production claim.
+Verified on 2026-11-17: full `go test ./...`, `go test -race ./...`, and `go vet ./...` passed. Tagged PostgreSQL integration tests passed twice against an isolated temporary local PostgreSQL cluster, including migration, tenant validation, duplicate event IDs and independent OBU baselines. Kafka integration was not run because the broker was unavailable. The 1,000-call gRPC load probe used the in-memory store; it is not a database performance result. This is an adversarial self-review, not an independent or external audit.

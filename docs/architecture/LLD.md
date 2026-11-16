@@ -34,7 +34,7 @@ Invoice query: `GET /invoice?obu=12345` returns `obuID`, `totalDistance`, and `t
 
 ## Distance consumer implementation
 
-Without `DATABASE_URL`, `CalculatorService` stores `map[int]coordinate` behind one `sync.Mutex`; this is explicitly volatile local mode. In PostgreSQL mode the consumer detects `EventCalculator` and calls `PostgresCalculator.CalculateEvent(ctx, eventID, data)`. Its transaction acquires `pg_advisory_xact_lock(hashtextextended(tenantID:OBUID))`, checks `processed_telemetry`, reads `trip_state`, calculates using mean Earth radius `6371.0088` km, and writes the event result and next coordinate together. A duplicate event ID returns the saved distance.
+Without `DATABASE_URL`, `CalculatorService` stores `map[vehicleKey]coordinate` keyed by tenant/OBU behind one `sync.Mutex`; this is explicitly volatile local mode. In PostgreSQL mode the consumer detects `EventCalculator` and calls `PostgresCalculator.CalculateEvent(ctx, eventID, data)`. Its transaction acquires `pg_advisory_xact_lock(hashtextextended(tenantID:OBUID))`, checks `processed_telemetry`, reads `trip_state`, calculates using mean Earth radius `6371.0088` km, and writes the event result and next coordinate together. A duplicate event ID returns the saved distance.
 
 `kafkaMessageReader` abstracts only `ReadMessage`, `CommitMessage`, `SubscribeTopics`, and `Close`. `processMessage` derives `eventID` from Kafka topic, partition and offset so a redelivery has a stable key. Production passes Confluent's Kafka consumer. `NewKafkaConsumer` reads brokers and consumer group from environment, turns auto-commit off, subscribes, and uses earliest reset for a new group. `Start(ctx)` owns cleanup. `run(ctx)` polls for up to 250 ms, calls `processMessage`, then commits only after the aggregator reports success. It stops on observed processing or commit failures.
 
@@ -42,7 +42,7 @@ This serial order is intentional for the current small consumer: later records a
 
 ## Aggregator HTTP and storage
 
-`newHTTPHandler` mounts `POST /aggregate` and `GET /invoice`. The POST boundary checks method, JSON media type, a 1 MiB maximum body, one strict JSON value, and positive OBU ID / nonnegative finite distance / positive timestamp. The invoice route requires a tenant bearer credential, exactly one positive `obu` parameter and maps `ErrInvoiceNotFound` to 404. `/aggregate` requires the internal service bearer token. The receiver derives tenant identity from the device token and overwrites no client-provided tenant field (unknown fields are rejected).
+`newHTTPHandler` mounts `POST /aggregate` and `GET /invoice`. The POST boundary checks method, JSON media type, a 1 MiB maximum body, one strict JSON value, and positive OBU ID / nonnegative finite distance / positive timestamp. The invoice route requires a tenant bearer credential, exactly one positive `obu` parameter and maps `ErrInvoiceNotFound` to 404. `/aggregate` requires the internal service bearer token. The receiver derives tenant identity from the device token; strict frame decoding rejects client-supplied tenant fields.
 
 `InvoiceAggregator` validates event ID (nonblank, at most 512 bytes), positive OBU ID, finite nonnegative distance and positive timestamp. `MemoryStore` is the volatile fallback and keys totals/events by tenant plus OBU/event. `PostgresStore` inserts into `aggregated_distance_events` with `ON CONFLICT (tenant_id, event_id) DO NOTHING`, then checks an existing identity has the same OBU, distance and timestamp; a mismatch returns `ErrEventIDConflict`. Invoice distance is `SUM(distance_km)` filtered by tenant and OBU. Composite tenant-first keys and indexes support scoped lookups. Amount calculation uses `float64` prototype pricing. Migration 002 backfills old rows to tenant 1 and replaces event/OBU primary keys with tenant-composite keys.
 
@@ -63,20 +63,20 @@ Current edge behavior:
 - Broker poll timeout is expected and retries the loop.
 - Other broker read errors stop the process.
 - Malformed JSON and invalid telemetry stop without offset commit; there is no DLQ yet.
-- HTTP failure stops without offset commit. PostgreSQL mode replays the saved distance; the aggregate ledger handles an ambiguous HTTP outcome idempotently.
-- HTTP success followed by a commit error can cause replay; event identity lets both durable stores detect the repeat.
-- Cancellation can cancel an in-flight HTTP request; the event remains uncommitted, and the request outcome may be ambiguous.
+- gRPC failure stops without offset commit. PostgreSQL mode replays the saved distance; the tenant-scoped aggregate ledger handles an ambiguous RPC outcome idempotently.
+- gRPC success followed by a commit error can cause replay; event identity lets both durable stores detect the repeat.
+- Cancellation can cancel an in-flight RPC, but current store interfaces do not propagate its context to SQL; the event remains uncommitted and the RPC outcome may be ambiguous.
 
 ## Implemented relational schema and future model boundary
 
-`internal/postgres.Open` applies embedded migration files in one transaction each, serializes concurrent startup with a transaction-scoped advisory lock, and records applied filenames in `schema_migrations`. `internal/postgres/migrations/001_distance_events.sql` creates:
+`internal/postgres.Open` applies embedded migration files in one transaction each, serializes concurrent startup with a transaction-scoped advisory lock, and records applied filenames in `schema_migrations`. `internal/postgres/migrations/001_distance_events.sql` creates the initial global-key tables:
 
-- `trip_state` keyed by tenant ID and OBU ID, with validated latitude and longitude.
-- `processed_telemetry` keyed by tenant ID and event ID, storing its calculated distance.
-- `aggregated_distance_events` keyed by tenant ID and event ID, storing the distance ledger row.
-- A B-tree index on `aggregated_distance_events(obu_id)` for invoice aggregation.
+- `trip_state` initially keyed by OBU ID, with validated latitude and longitude.
+- `processed_telemetry` initially keyed by event ID, storing its calculated distance.
+- `aggregated_distance_events` initially keyed by event ID, storing the distance ledger row.
+- The initial migration creates global keys; migration 002 adds tenant scope and tenant-first indexes for invoice aggregation.
 
-The two services share this schema in the local demo. Migration 002 adds a tenant registry, backfills existing rows into tenant 1, changes primary keys to `(tenant_id, obu_id)` or `(tenant_id, event_id)`, and adds tenant-first indexes. It has no retention policy, partitions, financial amount columns or immutable invoice records. Before expanding the relational model, tenant ownership and authenticated device identity need to be designed.
+The two services share this schema in the local demo. Migration 002 adds a tenant registry, backfills existing rows into tenant 1, changes primary keys to `(tenant_id, obu_id)` or `(tenant_id, event_id)`, and adds tenant-first indexes. It has no retention policy, partitions, financial amount columns or immutable invoice records. Before expanding the relational model further, consider fleet/vehicle ownership, event retention, partitioning and financial invoice semantics.
 
 - `tenants` and tenant-scoped `fleets`/`vehicles`, with unique constraints matching business identity.
 - Durable `telemetry_events`/inbox identity so replay can be detected.

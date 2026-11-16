@@ -1,7 +1,11 @@
-# ADR-019: Bound and close distance-to-aggregator HTTP requests
+# ADR-019: Bound and close the legacy distance-to-aggregator HTTP client
 
 - Status: Accepted
 - Date: 2026-11-15
+
+## Current status
+
+This ADR documents the HTTP client retained for compatibility and tests. The active Kafka processing path now uses the authenticated protobuf/gRPC client described in ADR-022 and ADR-023.
 
 ## Context
 
@@ -28,7 +32,7 @@ Calls no longer wait indefinitely and response connections can be reused. The fi
 
 ## Security implications
 
-The payload contains OBU identity and distance and currently uses plaintext HTTP in local configuration. The client does not authenticate the aggregator. TLS/service identity and request authentication are still required before deployment on an untrusted network.
+This legacy utility is not the production Kafka path. The retained `/aggregate` HTTP route now requires the shared internal service token, but the local HTTP transport remains plaintext. TLS and a managed service identity are still required before deployment on an untrusted network.
 
 ## Testing implications
 

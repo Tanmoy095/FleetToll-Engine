@@ -9,7 +9,7 @@ The Kafka consumer previously sent each calculated distance through an untyped H
 
 ## Decision
 
-Define `AggregatorService` in `api/fleettoll/v1/aggregator.proto` with `AggregateDistance` and `GetInvoice` RPCs. Use `int64` for OBU IDs to align with the PostgreSQL `BIGINT` model, then validate host-`int` range before conversion. Generate and check in Go bindings using protoc-gen-go v1.36.6 and protoc-gen-go-grpc v1.5.1. The calculator uses a generated gRPC client for the Kafka processing path. The aggregator registers a gRPC adapter and retains the HTTP endpoints. Both adapters call the same domain service and stores.
+Define `AggregatorService` in `api/fleettoll/v1/aggregator.proto` with `AggregateDistance` and `GetInvoice` RPCs. The tenant-auth revision adds `tenant_id` fields to request/response messages. Use `int64` for OBU IDs to align with PostgreSQL `BIGINT`, then validate host-`int` range before conversion. Generate and check in Go bindings using protoc-gen-go v1.36.6 and protoc-gen-go-grpc v1.5.1. The calculator uses a generated gRPC client for the Kafka processing path. The aggregator registers a gRPC adapter and retains the HTTP endpoints. Both adapters call the same domain service and stores.
 
 Map malformed input to `InvalidArgument`, conflicting event identity to `AlreadyExists`, missing invoice to `NotFound`, and storage failures to a generic `Internal` message. Limit inbound gRPC messages to 1 MiB. Bind gRPC to loopback by default and shut both servers down on process termination.
 
@@ -22,13 +22,13 @@ Map malformed input to `InvalidArgument`, conflicting event identity to `Already
 
 ## Consequences
 
-The internal call has typed messages, generated clients and language-neutral schema. The system now owns protobuf compatibility, code-generation tool versions and another listener. This change does not claim lower latency or higher throughput than HTTP. gRPC's listener is local-only by default and now protected by a shared service bearer token; transport remains plaintext, and an override must be guarded at deployment.
+The internal call has typed messages, generated clients and language-neutral schema. The system now owns protobuf compatibility, code-generation tool versions and another listener. This change does not claim lower latency or higher throughput than HTTP. gRPC's listener is local-only by default and protected by a shared service bearer token; transport remains plaintext, and an override must be guarded at deployment.
 
 The server adapter delegates to the existing domain service, so idempotency stays in the event ledger. The current service/store interfaces lack context parameters; a cancelled RPC may not stop an already-running PostgreSQL operation. Add context propagation before relying on deadlines for database resource control.
 
 ## Verification
 
-The focused transport tests use a generated client over loopback TCP and verify replay-safe same-event calls, conflict and validation status codes, not-found mapping, and storage-error redaction. The real-Kafka integration path is updated to call the gRPC client. Load results and the limits of the local one-shot probe belong in `docs/performance/GRPC_AGGREGATOR_LOCAL_LOAD.md`.
+The focused transport tests use a generated client over loopback TCP and verify replay-safe same-event calls, conflict and validation status codes, not-found mapping, and storage-error redaction. The real-Kafka integration path calls the authenticated gRPC client. The 2026-11-17 Kafka integration could not be rerun because no broker was available. Earlier PostgreSQL load measurements are historical; the latest authenticated in-memory result and its limits are in `docs/performance/GRPC_TENANT_AUTH_MEMORY_LOAD.md`.
 
 ## Revisit when
 

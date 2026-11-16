@@ -25,7 +25,7 @@ The WebSocket handler has connection-local socket and decoder state. The produce
 - `decodeOBUData` uses pointer fields so missing `lat`/`long` is distinct from a valid zero coordinate. It rejects unknown fields and trailing JSON.
 - `validateOBUData` requires a positive ID, finite latitude in `[-90,90]`, and finite longitude in `[-180,180]`.
 - Origin headers must match host and scheme. Missing Origin is accepted for native clients; this is not device authentication.
-- Invalid frames close with protocol/policy codes. Producer enqueue errors close with 1011. Valid messages currently receive no application-level acknowledgment.
+- Invalid frames close with protocol/policy codes. Producer errors close with 1011. The producer waits for broker delivery confirmation; the WebSocket protocol itself sends no application-level acknowledgment.
 - The producer logging middleware logs duration only; GPS and OBU identifiers are omitted.
 
 ```mermaid
@@ -71,7 +71,7 @@ Device bearer authentication, credential role checks, tenant assignment and OBU 
 
 ## Performance and reliability limits
 
-Two simultaneous connections were exercised for correctness under `-race`; no 1,000-connection workload, throughput, latency, CPU, memory or Kafka lag was measured. Frame size is bounded but connections and per-device message rate are not. `ProduceData` success currently means client enqueue accepted the message, not broker delivery confirmed. There is no graceful shutdown/drain policy or reconnect protocol.
+Two simultaneous connections were exercised for correctness under `-race`; no 1,000-connection workload, throughput, latency, CPU, memory or Kafka lag was measured. Frame size is bounded but connections and per-device message rate are not. `ProduceData` waits for Kafka delivery confirmation, but the WebSocket client receives no application acknowledgment. There is no graceful shutdown/drain policy or reconnect protocol.
 
 ## Interview explanation
 

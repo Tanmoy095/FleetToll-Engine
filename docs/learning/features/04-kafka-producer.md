@@ -2,14 +2,14 @@
 
 ## Business requirement
 
-GPS points need a durable buffer between device ingestion and trip processing. Kafka lets the receiver and calculator scale independently and permits replay from retained events. The producer must surface broker failures and keep one vehicle's records ordered within Kafka's partition model.
+GPS points need a durable buffer between device ingestion and trip processing. Kafka lets the receiver and calculator scale independently and permits replay from retained events. The producer must surface broker failures and keep each tenant/vehicle’s records ordered within Kafka's partition model.
 
 ## HLD
 
 ```mermaid
 flowchart LR
   WS[Validated WebSocket point] --> DP[DataProducer]
-  DP -->|key = OBU ID| K[(Kafka topic obudata)]
+  DP -->|key = tenantID:OBUID| K[(Kafka topic obudata)]
   K -->|same key maps to partition| C[Consumer group]
 ```
 
@@ -25,9 +25,9 @@ flowchart LR
 
 ## TDD and verification
 
-RED: the first broker integration test compiled after adapting cleanup, then failed because the received record key was empty (`record key = "", want OBU ID 8142`). This reproduced the missing partition-key behavior against a real broker.
+Historical RED: the first broker integration test failed because the received record key was empty (`record key = "", want OBU ID 8142`). The current key is `tenantID:OBUID`; the later tenant-auth change added isolation for tenant-local OBU IDs.
 
-GREEN:
+GREEN (original producer implementation; its key format was later extended with tenant ID):
 
 - `GOCACHE=/tmp/fleettoll-go-cache go test ./data_receiver -run '^TestKafkaProducer' -count=1` — passed unit tests for environment defaults/overrides, empty topic and pre-broker payload validation.
 - `KAFKA_TEST_BROKERS=localhost:9092 GOCACHE=/tmp/fleettoll-go-cache go test -tags=integration ./data_receiver -run '^TestKafkaProducerDeliversKeyedTelemetry$' -count=1 -timeout=60s` — passed against the local Kafka Compose broker.
@@ -37,13 +37,13 @@ GREEN:
 
 ## Security review
 
-Invalid device IDs and coordinates are rejected before Kafka access. Logs omit device identity and coordinates. The local broker has no TLS, SASL or ACLs. A malicious network client with broker access can publish or consume telemetry, and a WebSocket client can still spoof another OBU until device authentication is implemented. Idempotent producer mode does not reject distinct duplicate events.
+Invalid device IDs and coordinates are rejected before Kafka access. Logs omit device identity and coordinates. The local broker has no TLS, SASL or ACLs. A malicious network client with broker access can publish or consume telemetry, and direct Kafka writers can still spoof tenant/OBU values because broker ACLs are not configured. The WebSocket boundary now authenticates device credentials and checks OBU allowlists. Idempotent producer mode does not reject distinct duplicate events.
 
 No broker load test was run; one integration record was produced and read. No throughput or latency benchmark is claimed. `ProduceData` blocks the per-connection read loop until broker acknowledgment (or timeout), providing simple backpressure but limiting per-socket throughput.
 
 ## Interview explanation
 
-Explain that Kafka's key selects partition affinity. Choosing OBU ID lets one vehicle's events be ordered, while different vehicles can be processed in parallel. `acks=all` and idempotence strengthen producer delivery but do not make the entire pipeline exactly once. A timeout is an ambiguous outcome, so downstream consumer idempotency remains required.
+Explain that Kafka's key selects partition affinity. Choosing `tenantID:OBUID` lets one tenant vehicle’s events be ordered, while different tenant/vehicle pairs can be processed in parallel. `acks=all` and idempotence strengthen producer delivery but do not make the entire pipeline exactly once. A timeout is an ambiguous outcome, so downstream consumer idempotency remains required.
 
 Practice questions:
 

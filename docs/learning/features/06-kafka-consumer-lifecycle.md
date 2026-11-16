@@ -10,20 +10,20 @@ Telemetry must reach trip processing without the consumer silently advancing pas
 flowchart LR
   K[(Kafka partition)] -->|poll one record| C[Distance consumer]
   C --> V[Validate and calculate]
-  V -->|HTTP request with run context| A[Aggregator]
+  V -->|authenticated gRPC request with run context| A[Aggregator gRPC service]
   A -->|2xx| O[Commit record offset]
   A -->|error| S[Stop without commit]
   O --> K
 ```
 
-The consumer owns Kafka polling and offsets. The calculator owns its current in-memory previous coordinate per OBU. The aggregator owns accumulated invoice totals in its in-memory store. These ownership boundaries expose why this flow is not yet crash-safe: neither calculator state nor invoice totals are durable.
+The consumer owns Kafka polling and offsets. Calculator and aggregator state is keyed by tenant/OBU or tenant/event. PostgreSQL mode persists calculator inbox/trip state and aggregate distance rows; in-memory mode remains volatile and loses them on restart.
 
 ## LLD and Go concepts
 
 - `kafkaMessageReader` is a narrow interface containing only `ReadMessage`, `CommitMessage`, `SubscribeTopics` and `Close`. Production passes `*kafka.Consumer`; unit tests use a small fake. This is dependency injection by composition without mocking the entire Kafka library.
 - `NewKafkaConsumer` reads `KAFKA_BROKERS` and `KAFKA_CONSUMER_GROUP`; the executable reads `KAFKA_TOPIC`. Auto-commit is disabled. New groups use `auto.offset.reset=earliest`.
 - `Start(ctx)` owns `Close`. `run(ctx)` polls for at most 250 ms before it can observe cancellation, so shutdown latency is bounded by one poll plus current processing time.
-- `processMessage` decodes telemetry, calculates distance, and passes the context into `AggregateInvoiceContext`. This propagates cancellation to the outbound HTTP request.
+- `processMessage` decodes telemetry, calculates distance, and passes the context into `AggregateInvoiceContext`. The generated gRPC client attaches the shared internal service token and propagates cancellation to the RPC.
 - `run` commits only after `processMessage` succeeds. A downstream failure or failed commit ends the process with record topic/partition/offset in the error. It does not keep processing later records in the partition.
 - `CommitMessage` is synchronous at this decision boundary. A Kafka commit error may still be ambiguous; if aggregation already succeeded, replay can repeat the aggregation.
 
@@ -39,16 +39,16 @@ Malformed or invalid records stop the consumer without committing. That avoids s
 
 RED: added focused tests for commit only after success, no commit after aggregator failure, and stopping after a commit failure. The first run failed to compile because the injectable reader and run-loop seam were absent; this recorded the missing behavior boundary. After adding it, the tests exercised the ordering and error paths.
 
-GREEN:
+GREEN (the original HTTP client was later replaced in the Kafka path by authenticated gRPC):
 
-- `GOCACHE=/tmp/fleettoll-go-cache go test ./distance_calculator -run '^TestKafkaConsumer' -count=1` — passed with loopback permission. Covers successful aggregation then commit, no commit on HTTP 503, and a failed commit attempt returning an error.
-- `GOCACHE=/tmp/fleettoll-go-cache make integration-kafka` — passed against the local Compose Kafka broker. The tagged consumer test creates a unique topic, sends two real Kafka telemetry records, runs the production consumer against a loopback HTTP server, and checks initial distance `0` and next point about `111.195 km`.
+- `GOCACHE=/tmp/fleettoll-go-cache go test ./distance_calculator -run '^TestKafkaConsumer' -count=1` — passed with loopback permission. Covers successful aggregation then commit, no commit on aggregation failure, and a failed commit attempt returning an error.
+- `GOCACHE=/tmp/fleettoll-go-cache make integration-kafka` — passed against the local Compose Kafka broker on the earlier revision. This was unavailable on the 2026-11-17 tenant-auth run; rerun after the key/auth change. The tagged consumer test creates a unique topic, sends two real Kafka telemetry records, runs the production consumer against the aggregation client boundary, and checks initial distance `0` and next point about `111.195 km`.
 
-The first integration attempt failed because the test canceled the context after the handler signaled receipt but before the HTTP client consumed the response. The test now allows response and commit completion before shutdown; rerun passed. The 300 ms coordination delay is test synchronization, not a production latency claim.
+Historical test note: the original HTTP integration attempt failed because the test canceled context before the client consumed the response. The active Kafka path uses gRPC; the earlier fixture correction allowed response and commit completion before shutdown. The 300 ms coordination delay is test synchronization, not a production latency claim.
 
 ## Security review
 
-Adversarial scenarios exercised: an aggregator HTTP 503 must not result in `CommitMessage`; a Kafka commit error must terminate instead of continuing; malformed JSON returns a processing error and is not acknowledged. The tests confirm these behaviors. The local Kafka broker still has no TLS/SASL/ACL, OBU identity remains caller supplied, and there are no payload quotas, retry budget or DLQ. A party able to publish a malformed record can block its partition. See `docs/security/KAFKA_REVIEW.md`; no external penetration test was performed.
+Adversarial scenarios exercised: a downstream aggregation error must not result in `CommitMessage`; a Kafka commit error must terminate instead of continuing; malformed JSON returns a processing error and is not acknowledged. The tests confirm these behaviors. The local Kafka broker still has no TLS/SASL/ACL. Device credentials are enforced at WebSocket ingestion, but a producer with direct broker access can still forge telemetry. There are no payload quotas, retry budget or DLQ. A party able to publish a malformed record directly to the broker can block its partition. See `docs/security/KAFKA_REVIEW.md`; no external penetration test was performed.
 
 ## Performance and concurrency
 
@@ -60,12 +60,12 @@ One record is processed at a time per consumer instance, so partition order is p
 
 Questions to practice:
 
-1. Why can committing after HTTP still produce duplicate billing?
+1. Why can committing after gRPC still produce duplicate billing?
 2. What does Kafka commit ordering guarantee within one partition?
 3. Why does a fail-stop poison event hurt availability?
 4. Why isn't an idempotent Kafka producer enough to deduplicate downstream gRPC side effects?
-5. How would you transactionally persist the previous point, event inbox key and distance?
+5. How does the composite tenant/event key affect inbox idempotency?
 
 ## Exercise
 
-Design a PostgreSQL inbox table keyed by `(consumer_name, event_id)` and a trip-state row keyed by tenant and vehicle. Sketch a transaction that rejects a duplicate event and advances trip state atomically. Then explain how you would keep the HTTP invoice boundary idempotent without claiming a cross-system transaction.
+Extend the DLQ/replay design with tenant identity and an operator audit trail. Define how you avoid advancing a Kafka offset before a durable DLQ record exists, how redrive preserves the original event identity, and which database idempotency keys protect billing.

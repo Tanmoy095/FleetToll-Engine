@@ -5,8 +5,8 @@ Updated: 2026-11-17. This is an evidence-based progress record, not a production
 ## Implemented and verified slices
 
 - [x] WebSocket telemetry intake with per-connection lifecycle, bounded 4 KiB frames, strict JSON and coordinate validation, same-origin browser checks, and concurrent connection unit/integration coverage.
-- [x] Keyed Kafka producer with OBU partition key, idempotent producer configuration, `acks=all`, delivery result handling and real-broker producer integration.
-- [x] Kafka consumer with auto-commit disabled, explicit commit after successful authenticated gRPC aggregation, cancellation/close behavior and real-broker consumer integration.
+- [x] Keyed Kafka producer with tenant/OBU partition key, idempotent producer configuration, `acks=all`, and delivery result handling. Real-broker integration passed on the prior revision; rerun after the tenant-key change.
+- [x] Kafka consumer with auto-commit disabled, explicit commit after successful authenticated gRPC aggregation, and cancellation/close behavior. Real-broker integration passed on the prior revision; rerun after the tenant-auth change.
 - [x] Haversine kilometer calculation with coordinate/OBU validation and per-OBU state in local volatile mode.
 - [x] Defensive HTTP contracts for aggregation and invoice queries, including bounded strict JSON and typed invoice-not-found behavior.
 - [x] PostgreSQL persistence mode for the trip inbox/baseline and aggregate event ledger. The calculator transaction stores `processed_telemetry` and `trip_state` together. Replays reuse the saved distance; aggregator unique-key insertion prevents duplicate total contribution.
@@ -18,9 +18,15 @@ Updated: 2026-11-17. This is an evidence-based progress record, not a production
 
 ## Current feature status
 
-The tenant-isolation increment is implemented in code with credential-derived device identity, OBU allowlists, tenant-scoped memory/PostgreSQL access paths, tenant-qualified Kafka keys, a composite-key migration, tenant-aware protobuf fields, and service-token protection for the internal aggregation boundary. Full unit, race, vet and real PostgreSQL integration checks pass. Security review was adversarial self-review, not an independent audit. The load probe used the in-memory store. A temporary local PostgreSQL cluster was used because Docker was unavailable. The migration and real PostgreSQL integrations, full suite/race/vet, and an authenticated in-memory load probe passed. Kafka was not listening, so real Kafka integration remains to be rerun. No PostgreSQL load result is claimed for this revision.
+Tenant isolation is implemented across credential-derived device identity, OBU allowlists, tenant-scoped memory/PostgreSQL access, tenant-qualified Kafka keys, migration 002, tenant-aware protobuf fields, and service-token protection for internal aggregation. The exact checks and limits for this revision are:
 
-Credential configuration is a prototype shared-secret scheme. Provisioning other than seeded tenant 1 is manual. Rotation, revocation, TLS/mTLS, audit events, rate limits and managed user/device identity remain open. Legacy records without a tenant ID are assigned to tenant 1 for local compatibility; remove that fallback before accepting untrusted producers. There is no DLQ, bounded retry policy, PostGIS, financial-grade ledger, distributed tracing, production topology or external penetration test. No 1,000-WebSocket or sustained combined-workload test has been run.
+- Full unit suite, race detector, and `go vet` passed.
+- Tagged PostgreSQL integration suite passed twice against an isolated local PostgreSQL cluster. It covers migration/backfill, configured-tenant validation, replay, and same OBU/event IDs across tenants.
+- Kafka integration was not run because no broker was listening. Earlier real-broker results apply to the prior revision; rerun after the tenant key/auth change.
+- Authenticated 1,000-call gRPC probe passed with zero errors against the in-memory store. This is not a PostgreSQL load result.
+- Security review was adversarial self-review, not an independent audit.
+
+Credential configuration is a prototype shared-secret scheme. Tenant provisioning beyond seeded tenant 1 is manual. Rotation, revocation, TLS/mTLS, audit events, rate limits and managed identity remain open. Legacy messages without tenant ID map to tenant 1 for compatibility; remove that fallback before accepting untrusted producers. DLQ/retry, PostGIS, financial-grade billing, tracing, production topology and an external penetration test are not implemented. No 1,000-WebSocket or sustained combined-workload test has run.
 
 ## Next implementation sequence
 

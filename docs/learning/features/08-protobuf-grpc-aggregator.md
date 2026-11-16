@@ -8,8 +8,8 @@ After each Kafka event, the distance calculator must submit one calculated incre
 
 1. Kafka delivers telemetry; the calculator derives a stable event ID from topic, partition and offset.
 2. `distance_calculator/consumer.go` builds a `types.Distance` and calls its narrow aggregation-client interface.
-3. The production client in `distance_calculator/client/grpc.go` maps it to `AggregateDistanceRequest` and passes the caller context to the generated client.
-4. The aggregator adapter in `aggregator/grpc_transport.go` validates the fields, checks that the `int64` OBU ID fits the host `int`, maps the request to `types.Distance`, and delegates to the same domain service as HTTP. `int64` aligns with PostgreSQL `BIGINT` and avoids a smaller `int32` wire limit.
+3. The production client in `distance_calculator/client/grpc.go` maps tenant ID and event data to `AggregateDistanceRequest`, adds the internal service bearer token, and passes the caller context to the generated client.
+4. The aggregator adapter in `aggregator/grpc_transport.go` runs behind a service-token interceptor, validates the fields, checks that the `int64` OBU ID fits the host `int`, maps the tenant-qualified request to `types.Distance`, and delegates to the same domain service as HTTP. `int64` aligns with PostgreSQL `BIGINT` and avoids a smaller `int32` wire limit.
 5. The existing memory or PostgreSQL store deduplicates by event ID. The adapter maps domain outcomes to gRPC status codes.
 6. Only after successful aggregation does the consumer commit the Kafka offset.
 
@@ -63,8 +63,10 @@ Do not map every error to `Internal`: retry policies depend on distinguishing in
 
 ## Security and reliability limits
 
+The tenant-auth revision added `tenant_id` fields to aggregate and invoice protobuf messages. `GetInvoice` is available internally behind the service token; the public HTTP invoice route instead requires a tenant-role credential and derives its scope from authenticated context.
+
 - The gRPC listener defaults to `127.0.0.1:3001`; changing the address can expose it to other machines.
-- Credentials are plaintext and the RPC has no caller authentication or tenant authorization. Do not expose it outside local development.
+- The shared service token authenticates the trusted calculator but grants cross-tenant aggregation authority; tenant IDs in the RPC are trusted only because this caller is internal. Credentials are supplied through environment configuration, and plaintext transport is loopback-only.
 - The gRPC handler receives `context.Context`, but the current domain/store interfaces do not take context. A cancelled RPC might not stop a running SQL statement.
 - `DialGRPC` blocks until a connection is ready or its caller deadline expires. This catches a missing local service at startup; it does not add retry policy to individual RPCs.
 - PostgreSQL ledger uniqueness handles duplicate attempts, but the Kafka offset and SQL commit are separate. The claim is at-least-once delivery with idempotent database effects, not exactly-once processing.
@@ -80,7 +82,7 @@ make integration-kafka
 make integration-postgres
 ```
 
-The focused tests use loopback TCP and the generated Go client; the Kafka integration starts a real broker test and crosses gRPC. The PostgreSQL integration calls the real gRPC adapter backed by the real PostgreSQL ledger. Network sandbox restrictions may require approved local test execution. Record actual outcomes; do not infer that an integration ran because the test exists.
+The focused tests use loopback TCP and the generated Go client. PostgreSQL integration passed against a temporary local cluster on 2026-11-17, including tenant isolation and the real gRPC adapter. Kafka integration was not run on that revision because no broker was available; the earlier Kafka result applies to the pre-auth revision. Network sandbox restrictions may require approved local test execution. Record actual outcomes; do not infer that an integration ran because the test exists.
 
 ### TDD evidence from this slice
 

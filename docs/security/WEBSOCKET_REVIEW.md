@@ -22,7 +22,7 @@ The tests use a recording producer, not a Kafka broker. They prove receiver prot
 - Attack: connect without an Origin header and send a payload with any positive `obuID`; the receiver forwards it as telemetry for that device.
 - Evidence: valid-message integration test completes a WebSocket handshake without credentials; `handleWS` has no identity check.
 - Reproduction: connect to `ws://<receiver>/ws` without Authorization, then send `{"obuID":7,"lat":51.2,"long":4.4}`.
-- Root cause: device registration/authentication is not implemented.
+- Original root cause: device registration/authentication was not implemented at the time of the first review.
 - Fix: prototype device credentials now bind to a tenant and OBU allowlist. Receiver derives tenant ID from principal and rejects client tenant fields.
 - Regression test and retest: `TestWebSocketAuthenticatesTenantAndScopesOBU` verifies missing auth, two tenants sharing an OBU ID, and out-of-scope identity; receiver tests pass.
 - Remaining risk: rotation/revocation, TLS, quotas and managed enrollment remain absent; see `TENANT_ISOLATION_REVIEW.md`.

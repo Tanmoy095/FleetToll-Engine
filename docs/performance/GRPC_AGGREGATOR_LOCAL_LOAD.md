@@ -1,8 +1,8 @@
 # Local gRPC aggregator load probe
 
-**Date:** 2026-11-16
+**Date:** 2026-11-16 (historical, pre-authentication run)
 
-**Command:** `go run ./scripts/grpc_aggregate_load -users 1000`
+**Historical command:** `go run ./scripts/grpc_aggregate_load -users 1000` (the current probe requires `AGGREGATOR_GRPC_TOKEN` and sends tenant ID).
 
 **Backend:** local PostgreSQL 15 Compose service; aggregator bound to loopback; one unary request per concurrent goroutine.
 
@@ -18,4 +18,7 @@ All 1,000 calls returned successfully. This is the final rerun after widening OB
 
 This is a short, one-shot local probe, not sustained load, a production SLO, a capacity certification or a comparison proving gRPC faster than HTTP. It does not include Kafka ingestion, WebSockets, multiple service replicas, TLS, authentication, warm-up, long-running connections, mixed invoice reads, CPU/memory profiling or failure injection. Percentiles are per-RPC client latency and the test submits unique IDs to one OBU. Run multiple times and profile before drawing performance conclusions.
 
-Reproduce it by starting `docker compose up -d postgres`, starting the aggregator with the PostgreSQL DSN on `DATABASE_URL`, and executing `make load-grpc`. The probe is safe only against a local development database because it writes 1,000 event rows.
+To measure the current authenticated path, start PostgreSQL and the aggregator with a tenant credential config plus `AGGREGATOR_GRPC_TOKEN`, then set the same token for the load client and run `AGGREGATOR_GRPC_TOKEN="$AGGREGATOR_GRPC_TOKEN" go run ./scripts/grpc_aggregate_load -users 1000`. The probe is safe only against a local development database because it writes 1,000 event rows.
+
+
+This result did not include authentication or tenant IDs and is retained as historical baseline only. The latest authenticated in-memory measurement is in `GRPC_TENANT_AUTH_MEMORY_LOAD.md`; a new PostgreSQL-backed authenticated run is still needed.

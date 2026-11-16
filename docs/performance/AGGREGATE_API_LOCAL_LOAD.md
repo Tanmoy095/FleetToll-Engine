@@ -1,17 +1,18 @@
 # Aggregate API local concurrency measurement
 
-**Date:** 2026-11-15  
+**Date:** 2026-11-15 (historical, pre-tenant-auth run)
 **Environment:** local macOS development machine, Go service on loopback, PostgreSQL 15 in Docker Desktop on loopback port 15432. This is a development measurement only.
 
 ## Workload and command
 
-`scripts/aggregate_load.go` starts 1,000 goroutines behind one release barrier. Each sends one unique aggregate event ID to the PostgreSQL-backed `POST /aggregate`, then the probe records response latency, throughput and errors. It does not model sustained traffic, Kafka ingestion, WebSocket connections, warm-up, multiple tenants or a production network.
+`scripts/aggregate_load.go` starts 1,000 goroutines behind one release barrier. Each sends tenant 1 and one unique aggregate event ID to the PostgreSQL-backed `POST /aggregate`, then the probe records response latency, throughput and errors. It does not model sustained traffic, Kafka ingestion, WebSocket connections, warm-up, multiple tenants or a production network.
 
 ```bash
-DATABASE_URL='postgres://fleettoll:fleetdev@localhost:15432/fleettoll?sslmode=disable' \
-  go run ./aggregator -listenaddr 127.0.0.1:13000
-GOCACHE=/tmp/fleettoll-go-cache \
-  go run ./scripts/aggregate_load.go -url http://127.0.0.1:13000/aggregate -users 1000
+export FLEETTOLL_TENANT_API_KEYS='[{"token":"<tenant-token-at-least-32-bytes>","tenant_id":1,"role":"tenant"}]'
+export AGGREGATOR_GRPC_TOKEN='<service-token-at-least-32-bytes>'
+export DATABASE_URL='postgres://fleettoll:fleetdev@localhost:15432/fleettoll?sslmode=disable'
+go run ./aggregator -listenaddr 127.0.0.1:13000
+AGGREGATOR_GRPC_TOKEN="$AGGREGATOR_GRPC_TOKEN" go run ./scripts/aggregate_load.go -url http://127.0.0.1:13000/aggregate -users 1000
 ```
 
 ## Results
@@ -30,3 +31,6 @@ The initial result failed the client’s 10-second timeout for 53 requests. Code
 The one-shot local result is evidence that this version accepted 1,000 simultaneous request attempts, not a capacity guarantee. p95 at about 2.1 seconds is high for a production API. The Docker Desktop network/database and local machine are in the measured path, and this probe does not isolate their costs. Next, capture PostgreSQL pool wait/active counts, database CPU, query latency and Go CPU/memory profiles; add sustained arrivals and a realistic mix of OBU keys. Tune the pool only after those measurements. Do not extrapolate this result to 1,000 WebSocket connections.
 
 No query-plan optimization is claimed here. The invoice query filters by `obu_id` and sums matching rows; the migration adds a B-tree index for that filter. Run `EXPLAIN (ANALYZE, BUFFERS)` on a representative dataset before claiming the index improves a production query plan.
+
+
+The measurements above predate authentication and tenant IDs. The probe has since been updated to send `tenantID: 1` and the required `AGGREGATOR_GRPC_TOKEN`; rerun it before treating the old measurements as representative of the current request path.

@@ -28,12 +28,12 @@ Requests fail predictably, malformed payloads cannot mutate totals, body allocat
 
 ## Security implications
 
-Strict decoding, size limits and validation reduce parser ambiguity and resource abuse. `no-store` prevents intermediary caching of invoice responses. Authentication and tenant ownership are not present, so reachable clients can still forge an OBU distance and access another OBU's invoice. This is an open high-severity authorization finding, not a solved issue.
+Strict decoding, size limits and validation reduce parser ambiguity and resource abuse. `no-store` prevents intermediary caching of invoice responses. At the time of this ADR, authentication and tenant ownership were absent. The later tenant-auth increment requires a service token for `/aggregate`, a tenant-role credential for `/invoice`, and uses tenant-scoped storage; shared-secret lifecycle and TLS risks remain (see ADR-023).
 
 ## Operational and testing implications
 
-Tests use `httptest.NewServer` with the production mux and in-process service/store. Loopback binding was blocked in the default sandbox, so the integration test command required an approved elevated execution. PostgreSQL/Kafka integration, HTTP load testing and authentication tests remain future gates.
+Tests use `httptest.NewServer` with the production mux and in-process service/store. Current tests cover authentication and tenant isolation; the 2026-11-17 unit/race/vet/PostgreSQL checks passed. The latest Kafka broker integration remained unavailable.
 
 ## Reconsider this decision when
 
-The API gains batch ingestion, tenant-aware authorization, PostgreSQL persistence, or a generated OpenAPI contract. Revisit request-size limits and status/error schemas together with client compatibility.
+The API gains batch ingestion, managed workload identity, TLS/mTLS, PostgreSQL context propagation, or a generated OpenAPI contract. Revisit request-size limits and status/error schemas together with client compatibility.

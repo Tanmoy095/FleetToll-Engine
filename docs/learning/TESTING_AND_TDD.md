@@ -1,5 +1,9 @@
 # Testing and TDD
 
+## Historical implementation checkpoints
+
+The sections below preserve the original RED/GREEN evidence for earlier features. Current verification for the tenant-auth revision appears at the end.
+
 ## Haversine distance slice
 
 ### RED
@@ -42,7 +46,7 @@ Historical checkpoint status: the original pure calculation slice lacked infrast
 
 ## Adversarial review notes
 
-Executed unit probes for latitude/longitude bounds, NaN, and invalid OBU IDs; all are rejected before state mutation after the fix. The in-memory map is protected by a mutex and was exercised under the race detector. The tenant-auth increment now checks device credential OBU scope at the WebSocket boundary and uses tenant/OBU state keys. A publisher with direct Kafka access can still spoof messages because Kafka ACLs are absent; managed identity, bounded state lifecycle and external review remain open. No external penetration test was performed.
+Executed unit probes for latitude/longitude bounds, NaN, and invalid OBU IDs; all are rejected before state mutation after the fix. The in-memory map is protected by a mutex and was exercised under the race detector. The tenant-auth increment checks device credential OBU scope at WebSocket ingress and uses tenant/OBU state keys. Direct Kafka writers can still spoof messages because Kafka ACLs are absent; managed identity, bounded state lifecycle and external review remain open. No external penetration test was performed.
 
 ## Aggregator HTTP boundary
 
@@ -76,7 +80,7 @@ At the time this checkpoint was written, the API lacked auth. The tenant-auth in
 - `GOCACHE=/tmp/fleettoll-go-cache go test -race ./...` — passed across all packages. macOS linker warnings on test binaries were non-fatal.
 - `GOCACHE=/tmp/fleettoll-go-cache go vet ./...` — passed.
 
-The fake producer verifies that valid and invalid WebSocket messages reach or do not reach the producer interface. Kafka broker delivery, auth, TLS deployment, rate limits and 1,000 concurrent clients remain unverified.
+The fake producer verifies that valid and invalid WebSocket messages reach or do not reach the producer interface. Device auth is covered by the later tenant-isolation feature tests. This WebSocket test slice does not prove broker delivery, TLS deployment, rate limits or 1,000 concurrent clients.
 
 ## Kafka telemetry producer
 
@@ -84,11 +88,11 @@ The first real Kafka integration test demonstrated that the old producer's recor
 
 - `GOCACHE=/tmp/fleettoll-go-cache go test ./data_receiver -run '^TestKafkaProducer' -count=1` — passed environment/default, empty-topic and invalid-record checks.
 - `KAFKA_TEST_BROKERS=localhost:9092 GOCACHE=/tmp/fleettoll-go-cache go test -tags=integration ./data_receiver -run '^TestKafkaProducerDeliversKeyedTelemetry$' -count=1 -timeout=60s` — passed against local Compose Kafka.
-- `GOCACHE=/tmp/fleettoll-go-cache make integration-kafka` — passed against a real broker and consumer.
+- `GOCACHE=/tmp/fleettoll-go-cache make integration-kafka` — passed against a real broker and consumer on the pre-tenant-auth revision; the current tenant-auth integration could not be rerun because the broker was unavailable.
 
-The integration test creates a temporary two-partition topic, publishes one OBU record and reads it through a consumer to verify key and payload. It does not validate sustained throughput or consumer-to-invoice behavior.
+Historical producer integration created a temporary two-partition topic and verified key/payload. The current key is `tenantID:OBUID`; the Kafka broker was unavailable during the 2026-11-17 tenant-auth verification.
 
-## Distance-calculator HTTP client
+## Historical distance-calculator HTTP client
 
 RED: `GOCACHE=/tmp/fleettoll-go-cache go test ./distance_calculator/client -run '^TestAggregateInvoice' -count=1` failed because the client omitted `Content-Type: application/json` (the real HTTP test server returned 415) and left response bodies open.
 
@@ -104,8 +108,8 @@ Added tests for downstream-success-before-commit, no commit on aggregator failur
 
 ### GREEN and integration
 
-- `GOCACHE=/tmp/fleettoll-go-cache go test ./distance_calculator -run '^TestKafkaConsumer' -count=1` — passed after implementation with loopback access. The fake records commit attempts; HTTP fixtures exercise real client calls.
-- `GOCACHE=/tmp/fleettoll-go-cache make integration-kafka` — after resolving a cancellation race in the integration fixture, passed against the local Compose broker. It includes producer-to-broker read-back and two real consumer records delivered through the real calculation service to a loopback aggregator.
+- `GOCACHE=/tmp/fleettoll-go-cache go test ./distance_calculator -run '^TestKafkaConsumer' -count=1` — passed after implementation with loopback access. The fake records commit attempts; HTTP fixtures exercise the historical HTTP client seam. Production Kafka aggregation now uses gRPC.
+- `GOCACHE=/tmp/fleettoll-go-cache make integration-kafka` — after resolving a cancellation race in the integration fixture, passed on the pre-tenant-auth revision against the local Compose broker. Current tenant-auth integration is pending broker availability.
 
 The consumer disables auto-commit and commits only after a successful gRPC response. A downstream failure or invalid record stops the consumer without committing. This avoids silently acknowledging an observed failure but a malformed record can block the partition. A response lost after the aggregator accepted a write can cause a repeated RPC, which the durable event ledger deduplicates. The Kafka offset and PostgreSQL work still do not share one transaction; durable state, bounded retry and an audited DLQ remain necessary for robust operation.
 
@@ -124,7 +128,7 @@ The wire contract and full learning walkthrough are in `features/08-protobuf-grp
 - `go test -race ./...` — passed on 2026-11-16; non-fatal macOS linker warnings were emitted for two test binaries.
 - `go vet ./...` — passed.
 - `make integration-postgres` — passed against PostgreSQL 15, including a generated gRPC client writing and replaying one event through the actual SQL store.
-- `make integration-kafka` — passed against the local broker; the real consumer path uses the gRPC client.
+- `make integration-kafka` — passed against the local broker on the pre-tenant-auth revision; current revision pending broker availability.
 - `make generate-proto` — completed with no generated-file diff after the final schema change.
 - One-shot 1,000-call PostgreSQL-backed gRPC probe — 1,000 successes, zero errors, p95 319.9 ms. See the performance note for hardware and limitations.
 

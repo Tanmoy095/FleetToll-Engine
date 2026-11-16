@@ -27,7 +27,7 @@ flowchart LR
 | Kafka | Buffer and distribute telemetry records | Topic partitions and consumer offsets | Keyed event stream |
 | `distance_calculator` | Calculate incremental great-circle distance and return saved result on replay | PostgreSQL `processed_telemetry` and `trip_state` when configured; otherwise memory | Kafka in; gRPC out |
 | `aggregator` | Validate/idempotently store distance events and serve prototype invoice totals | PostgreSQL `aggregated_distance_events` when configured; otherwise memory | gRPC internal service; HTTP demo/query API |
-| `obu` | Generate sample device traffic | Simulator process | WebSocket client; current random coordinate generator needs correction |
+| `obu` | Generate sample device traffic | Simulator process | Authenticated WebSocket client; random points are valid-range demo input, not a realistic route |
 
 Tenant isolation and prototype bearer-token authentication are implemented in the telemetry, invoice and internal aggregation paths. A managed identity/auth service, credential rotation, TLS/mTLS, toll zones, a financial invoice ledger, reconciliation and tracing/metrics are not implemented. PostgreSQL currently stores telemetry processing state and distance events only.
 
@@ -40,24 +40,24 @@ sequenceDiagram
   participant K as Kafka
   participant C as Distance calculator
   participant A as Aggregator
-  D->>R: WebSocket telemetry JSON
+  D->>R: WebSocket telemetry JSON + bearer credential
   R->>R: Validate fields, ranges and frame size
-  R->>K: Publish JSON keyed by OBU ID
+  R->>K: Publish tenant-qualified JSON keyed by tenant/OBU
   K->>C: Deliver record from one partition
   C->>C: Build topic:partition:offset event ID
-  C->>DB: Transactionally read inbox, lock OBU state, calculate, save result + next point
+  C->>DB: Transactionally read tenant inbox, lock tenant/OBU state, calculate, save result + next point
   C->>A: AggregateDistance RPC (protobuf)
-  A->>DB: Insert unique event ledger row
+  A->>DB: Insert unique tenant/event ledger row
   A-->>C: gRPC success or typed status
   C->>K: Synchronously commit record offset
 ```
 
-If aggregation returns an error, the consumer stops without committing the record. With PostgreSQL configured, replay returns the saved distance and the unique aggregate ledger prevents duplicate totals after an ambiguous HTTP outcome. A malformed record or conflicting event ID can still block its partition because retry/DLQ and operator replay are not implemented.
+If aggregation returns an error, the consumer stops without committing the record. With PostgreSQL configured, replay returns the saved distance and the tenant-scoped unique aggregate ledger prevents duplicate totals after an ambiguous gRPC outcome. A malformed record or conflicting event ID can still block its partition because retry/DLQ and operator replay are not implemented.
 
 ## Data ownership and consistency
 
-- Kafka is the durable event buffer. The producer uses OBU ID as the key; same-key records are assigned to one partition.
-- PostgreSQL mode commits the processed-event result and next OBU coordinate in one transaction. A transaction-scoped advisory lock serializes the read/modify/write for one OBU.
+- Kafka is the durable event buffer. The producer uses `tenantID:OBUID` as the key; same tenant/vehicle records are assigned to one partition.
+- PostgreSQL mode commits the processed-event result and next OBU coordinate in one transaction. A tenant-qualified transaction-scoped advisory lock serializes the read/modify/write for one tenant/OBU.
 - The aggregator's event ID primary key makes a distance contribution unique; invoice totals sum the accepted ledger rows.
 - Kafka offset commit, PostgreSQL processing and gRPC aggregation do not share one transaction. This is at-least-once delivery with idempotent database effects, not exactly-once processing or financial billing.
 - If `DATABASE_URL` is unset, both services use volatile in-memory stores and restart-safe behavior does not apply.
@@ -66,7 +66,7 @@ The internal RPC uses the versioned source contract at `api/fleettoll/v1/aggrega
 
 ## Scaling and operations
 
-Kafka partitions can distribute different OBU keys across consumer instances. Per-OBU ordering is partition-scoped. PostgreSQL shares state across replicas and the advisory lock protects an OBU during rebalances. The consumer handles one record at a time per instance and downstream gRPC latency applies backpressure. No production benchmark establishes a gRPC capacity advantage over HTTP.
+Kafka partitions can distribute different tenant/OBU keys across consumer instances. Per-tenant/OBU ordering is partition-scoped. PostgreSQL shares state across replicas and the tenant-qualified advisory lock protects one tenant/OBU state during rebalances. The consumer handles one record at a time per instance and downstream gRPC latency applies backpressure. No production benchmark establishes a gRPC capacity advantage over HTTP.
 
 The local Compose setup uses a single plaintext Kafka broker and ZooKeeper plus PostgreSQL 15 bound to localhost. It is suitable for local integration checks only. There are no production broker replicas, database backup policy, autoscaling policy, service metrics or traces.
 

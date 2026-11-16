@@ -20,15 +20,15 @@ Accept multiple OBU device connections without cross-routing data; validate each
 
 ## Decision
 
-`DataReceiver` stores only the shared producer. Each `handleWS` invocation upgrades one request, sets a 4 KiB read limit, then synchronously reads, decodes and validates messages until the socket ends. JSON decoding rejects unknown/trailing values and requires `obuID`, `lat`, and `long`. Coordinate and ID bounds are checked before calling the producer. Bad frames are closed with a policy/invalid-payload code; producer failure closes with 1011. Origin must match request host and transport scheme; clients without an Origin header (native OBU clients) are allowed. Logs omit device ID and coordinates.
+`DataReceiver` stores the shared producer and an authentication configuration; each WebSocket connection remains local to its handler. Each `handleWS` invocation upgrades one request, sets a 4 KiB read limit, then synchronously reads, decodes and validates messages until the socket ends. JSON decoding rejects unknown/trailing values and requires `obuID`, `lat`, and `long`. Coordinate and ID bounds are checked before calling the producer. Bad frames are closed with a policy/invalid-payload code; producer failure closes with 1011. Origin must match request host and transport scheme; clients without an Origin header (native OBU clients) are allowed. Logs omit device ID and coordinates.
 
 ## Benefits and trade-offs
 
-Connection ownership is easy to reason about, concurrent devices no longer overwrite one another, and the HTTP handler ends with the socket. The 4 KiB cap bounds one frame, not total connection count, message rate, or aggregate memory. There is no application acknowledgment proving Kafka broker delivery; current producer interface only returns enqueue errors.
+Connection ownership is easy to reason about, concurrent devices no longer overwrite one another, and the HTTP handler ends with the socket. The 4 KiB cap bounds one frame, not total connection count, message rate, or aggregate memory. The producer waits for a Kafka delivery result, but the WebSocket protocol sends no application acknowledgment to the device.
 
 ## Security implications
 
-Origin checking mitigates browser cross-site WebSocket use but is not authentication. Any native client can omit Origin and claim any positive OBU ID. Authentication, device revocation, rate limiting, TLS, and tenant binding remain open. GPS values and device IDs are removed from logs.
+Origin checking mitigates browser cross-site WebSocket use but is not authentication. This ADR originally allowed unauthenticated native clients. The later tenant-auth increment requires a device bearer credential, derives tenant identity from it and checks the OBU allowlist. Revocation, managed provisioning, rate limiting and TLS remain open. GPS values and device IDs are removed from logs.
 
 ## Operational and testing implications
 
@@ -36,4 +36,4 @@ Tests use a real loopback WebSocket handshake/frame exchange via `httptest.Serve
 
 ## Reconsider this decision when
 
-Introducing device authentication, a bounded connection manager, broker-delivery acknowledgments, or a different WebSocket library. Revisit frame size and close/error policy with a versioned client protocol.
+Introducing managed device authentication, a bounded connection manager, broker-delivery acknowledgments, or a different WebSocket library. Revisit frame size and close/error policy with a versioned client protocol.

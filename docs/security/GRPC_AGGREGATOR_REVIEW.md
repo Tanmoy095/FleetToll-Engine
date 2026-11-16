@@ -21,7 +21,7 @@
 
 ## Checks executed
 
-- Focused generated-client loopback tests: pass.
+- Focused generated-client loopback tests: pass, including missing/wrong service-token checks.
 - Full unit suite with `-race`: pass. macOS emitted non-fatal linker `LC_DYSYMTAB` warnings for test binaries.
 - Real PostgreSQL 15 integration: pass, including gRPC aggregate/replay/invoice round trip.
 - Real Kafka broker integration: not available on the 2026-11-17 feature run (local broker port was closed); the earlier 2026-11-16 result applied to the previous revision.

@@ -4,7 +4,7 @@
 
 ### Business behavior
 
-Each valid GPS point is compared only with the previous accepted point for that same OBU. The OBU ID must be positive. The first point initializes state and contributes zero kilometers. Subsequent points add great-circle distance in kilometers, using a mean Earth radius of 6,371.0088 km. A latitude outside `[-90, 90]`, longitude outside `[-180, 180]`, NaN, or infinity is rejected before state changes.
+Each valid GPS point is compared only with the previous accepted point for the same tenant/OBU pair. Both tenant and OBU IDs must be positive. The first point initializes state and contributes zero kilometers. Subsequent points add great-circle distance in kilometers, using a mean Earth radius of 6,371.0088 km. A latitude outside `[-90, 90]`, longitude outside `[-180, 180]`, NaN, or infinity is rejected before state changes.
 
 ### Why Haversine
 
@@ -16,7 +16,7 @@ Latitude and longitude are angles, not planar distances. A one-degree longitude 
 - `sync.Mutex` protects both lookup and update as one critical section. Without it concurrent Kafka processing could race or overwrite state inconsistently.
 - Validation occurs before taking the lock and before state mutation, so rejected input cannot poison the next distance calculation.
 - `math.Atan2` computes the central angle robustly. The Haversine intermediate is clamped to `[0, 1]` to account for floating-point rounding near antipodal points.
-- The algorithm is O(1) per GPS point and retains O(number of active OBUs) in-memory state. State is currently lost on restart; durable trip state is a separate unfinished phase.
+- The algorithm is O(1) per GPS point and retains O(number of active tenant/OBU pairs) in-memory state. Memory mode is lost on restart; PostgreSQL mode persists trip state and inbox results.
 
 ### Test evidence
 
@@ -24,7 +24,7 @@ Latitude and longitude are angles, not planar distances. A one-degree longitude 
 
 ### Current limitation
 
-The calculation service has no trip expiry, late-event policy, or event-time ordering. Durable persistence and tenant-aware state are implemented in PostgreSQL mode; local in-memory state is still volatile. It assumes each incoming point is the next point for that OBU. Kafka replay can therefore repeat state transitions unless the consumer and state persistence gain idempotency. Basic malicious-input probes and race detection passed, but Kafka broker authentication, managed device identity, state bounds, credential lifecycle, and external penetration testing remain outstanding.
+The calculation service has no trip expiry, late-event policy, or event-time ordering. Durable persistence and tenant-aware state are implemented in PostgreSQL mode; local in-memory state is still volatile. It assumes each incoming point is the next point for that tenant/OBU. Late-event ordering policy and state expiry are not implemented. Kafka broker authentication/ACLs, managed device identity, state bounds, credential lifecycle, and external penetration testing remain outstanding.
 
 ## Internal protobuf/gRPC aggregation
 
@@ -74,7 +74,7 @@ No real Kafka or end-to-end test was run for this feature. The calculation path 
 
 ## Adversarial review notes
 
-Executed unit probes for latitude/longitude bounds, NaN, and invalid OBU IDs; all are rejected before state mutation after the fix. The in-memory map is protected by a mutex and was exercised under the race detector. This does not establish authentication or tenant ownership: the Kafka message's OBU ID is still trusted, so a publisher that can write to the topic can spoof another OBU or grow state with many IDs. Kafka ACLs, device identity binding, bounded state lifecycle, and tenant checks remain open security work. No external penetration test was performed.
+Executed unit probes for latitude/longitude bounds, NaN, and invalid OBU IDs; all are rejected before state mutation after the fix. The in-memory map is protected by a mutex and was exercised under the race detector. The receiver now authenticates device credentials and scopes OBU IDs; the Kafka consumer still trusts broker payloads. A direct broker writer can spoof tenant/OBU data because Kafka ACLs are absent. Managed identity, bounded state lifecycle, broker controls and external review remain open. No external penetration test was performed.
 
 ## Tenant identity and authorization
 
