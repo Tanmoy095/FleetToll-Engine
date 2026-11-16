@@ -18,20 +18,20 @@ func TestCalculatorServiceCalculatesHaversineKilometers(t *testing.T) {
 	}{
 		{
 			name: "first point has no distance",
-			from: types.OBUData{OBUID: 1, Latitude: 0, Longitude: 0},
-			to:   types.OBUData{OBUID: 1, Latitude: 0, Longitude: 0},
+			from: types.OBUData{TenantID: types.LegacyTenantID, OBUID: 1, Latitude: 0, Longitude: 0},
+			to:   types.OBUData{TenantID: types.LegacyTenantID, OBUID: 1, Latitude: 0, Longitude: 0},
 			want: 0,
 		},
 		{
 			name: "one degree along equator is about 111 kilometers",
-			from: types.OBUData{OBUID: 2, Latitude: 0, Longitude: 0},
-			to:   types.OBUData{OBUID: 2, Latitude: 0, Longitude: 1},
+			from: types.OBUData{TenantID: types.LegacyTenantID, OBUID: 2, Latitude: 0, Longitude: 0},
+			to:   types.OBUData{TenantID: types.LegacyTenantID, OBUID: 2, Latitude: 0, Longitude: 1},
 			want: 111.1949266,
 		},
 		{
 			name: "same coordinates have zero distance",
-			from: types.OBUData{OBUID: 3, Latitude: 45, Longitude: 90},
-			to:   types.OBUData{OBUID: 3, Latitude: 45, Longitude: 90},
+			from: types.OBUData{TenantID: types.LegacyTenantID, OBUID: 3, Latitude: 45, Longitude: 90},
+			to:   types.OBUData{TenantID: types.LegacyTenantID, OBUID: 3, Latitude: 45, Longitude: 90},
 			want: 0,
 		},
 	}
@@ -56,9 +56,9 @@ func TestCalculatorServiceCalculatesHaversineKilometers(t *testing.T) {
 func TestCalculatorServiceKeepsIndependentVehicleState(t *testing.T) {
 	svc := NewCalculatorService()
 	points := []types.OBUData{
-		{OBUID: 10, Latitude: 0, Longitude: 0},
-		{OBUID: 20, Latitude: 0, Longitude: 10},
-		{OBUID: 10, Latitude: 0, Longitude: 1},
+		{TenantID: types.LegacyTenantID, OBUID: 10, Latitude: 0, Longitude: 0},
+		{TenantID: types.LegacyTenantID, OBUID: 20, Latitude: 0, Longitude: 10},
+		{TenantID: types.LegacyTenantID, OBUID: 10, Latitude: 0, Longitude: 1},
 	}
 	for i, point := range points {
 		got, err := svc.CalculateDistance(point)
@@ -76,11 +76,11 @@ func TestCalculatorServiceRejectsInvalidCoordinates(t *testing.T) {
 		name string
 		data types.OBUData
 	}{
-		{name: "latitude below range", data: types.OBUData{OBUID: 1, Latitude: -90.0001, Longitude: 0}},
-		{name: "latitude above range", data: types.OBUData{OBUID: 1, Latitude: 90.0001, Longitude: 0}},
-		{name: "longitude below range", data: types.OBUData{OBUID: 1, Latitude: 0, Longitude: -180.0001}},
-		{name: "longitude above range", data: types.OBUData{OBUID: 1, Latitude: 0, Longitude: 180.0001}},
-		{name: "non-finite latitude", data: types.OBUData{OBUID: 1, Latitude: math.NaN(), Longitude: 0}},
+		{name: "latitude below range", data: types.OBUData{TenantID: types.LegacyTenantID, OBUID: 1, Latitude: -90.0001, Longitude: 0}},
+		{name: "latitude above range", data: types.OBUData{TenantID: types.LegacyTenantID, OBUID: 1, Latitude: 90.0001, Longitude: 0}},
+		{name: "longitude below range", data: types.OBUData{TenantID: types.LegacyTenantID, OBUID: 1, Latitude: 0, Longitude: -180.0001}},
+		{name: "longitude above range", data: types.OBUData{TenantID: types.LegacyTenantID, OBUID: 1, Latitude: 0, Longitude: 180.0001}},
+		{name: "non-finite latitude", data: types.OBUData{TenantID: types.LegacyTenantID, OBUID: 1, Latitude: math.NaN(), Longitude: 0}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -94,7 +94,7 @@ func TestCalculatorServiceRejectsInvalidCoordinates(t *testing.T) {
 func TestCalculatorServiceRejectsInvalidOBUIdentity(t *testing.T) {
 	for _, obuID := range []int{0, -1} {
 		t.Run(fmt.Sprintf("obu_%d", obuID), func(t *testing.T) {
-			if _, err := NewCalculatorService().CalculateDistance(types.OBUData{OBUID: obuID, Latitude: 0, Longitude: 0}); err == nil {
+			if _, err := NewCalculatorService().CalculateDistance(types.OBUData{TenantID: types.LegacyTenantID, OBUID: obuID, Latitude: 0, Longitude: 0}); err == nil {
 				t.Fatal("expected invalid OBU ID error")
 			}
 		})
@@ -110,7 +110,7 @@ func TestCalculatorServiceSupportsConcurrentVehicles(t *testing.T) {
 		wg.Add(1)
 		go func(obuID int) {
 			defer wg.Done()
-			if got, err := svc.CalculateDistance(types.OBUData{OBUID: obuID, Latitude: 0, Longitude: 0}); err != nil {
+			if got, err := svc.CalculateDistance(types.OBUData{TenantID: types.LegacyTenantID, OBUID: obuID, Latitude: 0, Longitude: 0}); err != nil {
 				errCh <- err
 			} else if got != 0 {
 				errCh <- fmt.Errorf("first point for OBU %d = %v km, want 0", obuID, got)

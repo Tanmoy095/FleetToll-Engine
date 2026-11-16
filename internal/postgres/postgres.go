@@ -79,3 +79,31 @@ func Open(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	}
 	return pool, nil
 }
+
+func ValidateTenantIDs(ctx context.Context, pool *pgxpool.Pool, tenantIDs []int64) error {
+	if len(tenantIDs) == 0 {
+		return fmt.Errorf("at least one tenant ID is required")
+	}
+	rows, err := pool.Query(ctx, `SELECT tenant_id FROM tenants WHERE tenant_id = ANY($1)`, tenantIDs)
+	if err != nil {
+		return fmt.Errorf("validate configured tenants: %w", err)
+	}
+	defer rows.Close()
+	found := make(map[int64]struct{}, len(tenantIDs))
+	for rows.Next() {
+		var tenantID int64
+		if err := rows.Scan(&tenantID); err != nil {
+			return fmt.Errorf("read configured tenant: %w", err)
+		}
+		found[tenantID] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read configured tenants: %w", err)
+	}
+	for _, tenantID := range tenantIDs {
+		if _, exists := found[tenantID]; !exists {
+			return fmt.Errorf("configured tenant ID %d is not provisioned", tenantID)
+		}
+	}
+	return nil
+}

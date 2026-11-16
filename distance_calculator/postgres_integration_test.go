@@ -28,9 +28,9 @@ func TestPostgresCalculatorReplayKeepsDistanceAndBaseline(t *testing.T) {
 	defer pool.Close()
 	service := NewPostgresCalculator(pool)
 	obuID := int(time.Now().UnixNano()%1_000_000_000) + 1
-	first := types.OBUData{OBUID: obuID, Latitude: 0, Longitude: 0}
-	second := types.OBUData{OBUID: obuID, Latitude: 0, Longitude: 1}
-	third := types.OBUData{OBUID: obuID, Latitude: 0, Longitude: 2}
+	first := types.OBUData{TenantID: types.LegacyTenantID, OBUID: obuID, Latitude: 0, Longitude: 0}
+	second := types.OBUData{TenantID: types.LegacyTenantID, OBUID: obuID, Latitude: 0, Longitude: 1}
+	third := types.OBUData{TenantID: types.LegacyTenantID, OBUID: obuID, Latitude: 0, Longitude: 2}
 	if got, err := service.CalculateEvent(ctx, fmt.Sprintf("pg-trip:%d:1", obuID), first); err != nil || got != 0 {
 		t.Fatalf("baseline event distance = %v, err = %v", got, err)
 	}
@@ -48,5 +48,40 @@ func TestPostgresCalculatorReplayKeepsDistanceAndBaseline(t *testing.T) {
 	next, err := restarted.CalculateEvent(ctx, fmt.Sprintf("pg-trip:%d:3", obuID), third)
 	if err != nil || math.Abs(next-want) > 0.001 {
 		t.Fatalf("next distance after replay = %.8f, err = %v; want %.8f", next, err, want)
+	}
+}
+
+func TestPostgresCalculatorIsolatesSameOBUAcrossTenants(t *testing.T) {
+	dsn := os.Getenv("DATABASE_TEST_URL")
+	if dsn == "" {
+		t.Skip("set DATABASE_TEST_URL to run against PostgreSQL")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	pool, err := postgres.Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	tenantID := time.Now().UnixNano()
+	if _, err := pool.Exec(ctx, `INSERT INTO tenants (tenant_id, tenant_name) VALUES ($1, $2)`, tenantID, fmt.Sprintf("calc-integration-%d", tenantID)); err != nil {
+		t.Fatal(err)
+	}
+	service := NewPostgresCalculator(pool)
+	obuID := int(tenantID % 1_000_000_000)
+	firstTenant := types.OBUData{TenantID: types.LegacyTenantID, OBUID: obuID, Latitude: 0, Longitude: 0}
+	secondTenant := types.OBUData{TenantID: tenantID, OBUID: obuID, Latitude: 0, Longitude: 10}
+	eventID := fmt.Sprintf("shared-event-id:%d", tenantID)
+	if got, err := service.CalculateEvent(ctx, eventID, firstTenant); err != nil || got != 0 {
+		t.Fatalf("first tenant baseline = %v, err %v", got, err)
+	}
+	if got, err := service.CalculateEvent(ctx, eventID, secondTenant); err != nil || got != 0 {
+		t.Fatalf("second tenant baseline = %v, err %v", got, err)
+	}
+	next := secondTenant
+	next.Longitude = 11
+	got, err := service.CalculateEvent(ctx, "second-tenant-next", next)
+	if err != nil || math.Abs(got-111.1949266) > 0.001 {
+		t.Fatalf("second tenant distance = %v, err %v", got, err)
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"time"
@@ -14,6 +15,8 @@ import (
 type EventCalculator interface {
 	CalculateEvent(context.Context, string, types.OBUData) (float64, error)
 }
+
+var ErrTelemetryEventConflict = errors.New("telemetry event identity conflicts with existing tenant or OBU data")
 
 type PostgresCalculator struct{ pool *pgxpool.Pool }
 
@@ -40,12 +43,17 @@ func (s *PostgresCalculator) CalculateEvent(ctx context.Context, eventID string,
 		return 0, fmt.Errorf("begin telemetry transaction: %w", err)
 	}
 	defer tx.Rollback(context.Background())
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(data.OBUID)); err != nil {
+	lockKey := fmt.Sprintf("%d:%d", data.TenantID, data.OBUID)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, lockKey); err != nil {
 		return 0, fmt.Errorf("lock vehicle state: %w", err)
 	}
 	var priorDistance float64
-	err = tx.QueryRow(ctx, `SELECT distance_km FROM processed_telemetry WHERE event_id = $1`, eventID).Scan(&priorDistance)
+	var priorOBUID int64
+	err = tx.QueryRow(ctx, `SELECT distance_km, obu_id FROM processed_telemetry WHERE tenant_id=$1 AND event_id=$2`, data.TenantID, eventID).Scan(&priorDistance, &priorOBUID)
 	if err == nil {
+		if priorOBUID != int64(data.OBUID) {
+			return 0, ErrTelemetryEventConflict
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return 0, fmt.Errorf("commit replay lookup: %w", err)
 		}
@@ -55,7 +63,7 @@ func (s *PostgresCalculator) CalculateEvent(ctx context.Context, eventID string,
 		return 0, fmt.Errorf("lookup processed event: %w", err)
 	}
 	var previous coordinate
-	err = tx.QueryRow(ctx, `SELECT latitude, longitude FROM trip_state WHERE obu_id = $1 FOR UPDATE`, data.OBUID).Scan(&previous.latitude, &previous.longitude)
+	err = tx.QueryRow(ctx, `SELECT latitude, longitude FROM trip_state WHERE tenant_id=$1 AND obu_id=$2 FOR UPDATE`, data.TenantID, data.OBUID).Scan(&previous.latitude, &previous.longitude)
 	distance := 0.0
 	if err == nil {
 		distance = haversineDistance(previous, coordinate{latitude: data.Latitude, longitude: data.Longitude})
@@ -65,12 +73,12 @@ func (s *PostgresCalculator) CalculateEvent(ctx context.Context, eventID string,
 	if math.IsNaN(distance) || math.IsInf(distance, 0) {
 		return 0, fmt.Errorf("computed distance is not finite")
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO trip_state (obu_id, latitude, longitude) VALUES ($1,$2,$3)
-		ON CONFLICT (obu_id) DO UPDATE SET latitude=EXCLUDED.latitude, longitude=EXCLUDED.longitude, updated_at=now()`, data.OBUID, data.Latitude, data.Longitude)
+	_, err = tx.Exec(ctx, `INSERT INTO trip_state (tenant_id, obu_id, latitude, longitude) VALUES ($1,$2,$3,$4)
+		ON CONFLICT (tenant_id, obu_id) DO UPDATE SET latitude=EXCLUDED.latitude, longitude=EXCLUDED.longitude, updated_at=now()`, data.TenantID, data.OBUID, data.Latitude, data.Longitude)
 	if err != nil {
 		return 0, fmt.Errorf("update vehicle baseline: %w", err)
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO processed_telemetry (event_id, obu_id, distance_km) VALUES ($1,$2,$3)`, eventID, data.OBUID, distance)
+	_, err = tx.Exec(ctx, `INSERT INTO processed_telemetry (tenant_id, event_id, obu_id, distance_km) VALUES ($1,$2,$3,$4)`, data.TenantID, eventID, data.OBUID, distance)
 	if err != nil {
 		return 0, fmt.Errorf("record processed event: %w", err)
 	}
@@ -81,8 +89,8 @@ func (s *PostgresCalculator) CalculateEvent(ctx context.Context, eventID string,
 }
 
 func validateOBUData(data types.OBUData) error {
-	if data.OBUID <= 0 {
-		return fmt.Errorf("OBU ID must be positive")
+	if data.TenantID <= 0 || data.OBUID <= 0 {
+		return fmt.Errorf("tenant and OBU IDs must be positive")
 	}
 	if math.IsNaN(data.Latitude) || math.IsInf(data.Latitude, 0) || data.Latitude < -90 || data.Latitude > 90 {
 		return fmt.Errorf("invalid latitude")

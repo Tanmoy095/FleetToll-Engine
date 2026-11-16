@@ -17,7 +17,12 @@ type CalculatorServicer interface {
 
 type CalculatorService struct {
 	mu         sync.Mutex
-	prevPoints map[int]coordinate
+	prevPoints map[vehicleKey]coordinate
+}
+
+type vehicleKey struct {
+	tenantID int64
+	obuID    int
 }
 
 type coordinate struct {
@@ -26,12 +31,12 @@ type coordinate struct {
 }
 
 func NewCalculatorService() CalculatorServicer {
-	return &CalculatorService{prevPoints: make(map[int]coordinate)}
+	return &CalculatorService{prevPoints: make(map[vehicleKey]coordinate)}
 }
 
 func (s *CalculatorService) CalculateDistance(data types.OBUData) (float64, error) {
-	if data.OBUID <= 0 {
-		return 0, fmt.Errorf("OBU ID must be positive")
+	if data.TenantID <= 0 || data.OBUID <= 0 {
+		return 0, fmt.Errorf("tenant and OBU IDs must be positive")
 	}
 	if math.IsNaN(data.Latitude) || math.IsInf(data.Latitude, 0) || data.Latitude < -90 || data.Latitude > 90 {
 		return 0, fmt.Errorf("latitude %v is outside valid range [-90, 90]", data.Latitude)
@@ -44,8 +49,9 @@ func (s *CalculatorService) CalculateDistance(data types.OBUData) (float64, erro
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	previous, exists := s.prevPoints[data.OBUID]
-	s.prevPoints[data.OBUID] = current
+	key := vehicleKey{tenantID: data.TenantID, obuID: data.OBUID}
+	previous, exists := s.prevPoints[key]
+	s.prevPoints[key] = current
 	if !exists {
 		return 0, nil
 	}
