@@ -12,7 +12,7 @@ Latitude and longitude are angles, not planar distances. A one-degree longitude 
 
 ### Go concepts in this implementation
 
-- `map[int]coordinate` associates each OBU ID with its most recent accepted point. A single slice shared by all vehicles caused cross-vehicle contamination.
+- `map[tenantOBU]coordinate` associates each tenant/OBU pair with its most recent accepted point. A single slice shared by all vehicles caused cross-vehicle contamination.
 - `sync.Mutex` protects both lookup and update as one critical section. Without it concurrent Kafka processing could race or overwrite state inconsistently.
 - Validation occurs before taking the lock and before state mutation, so rejected input cannot poison the next distance calculation.
 - `math.Atan2` computes the central angle robustly. The Haversine intermediate is clamped to `[0, 1]` to account for floating-point rounding near antipodal points.
@@ -24,11 +24,11 @@ Latitude and longitude are angles, not planar distances. A one-degree longitude 
 
 ### Current limitation
 
-The calculation service has no trip expiry, late-event policy, event-time ordering, persistence, or tenant-aware identity. It assumes each incoming point is the next point for that OBU. Kafka replay can therefore repeat state transitions unless the consumer and state persistence gain idempotency. Basic malicious-input probes and race detection passed, but Kafka authentication, device identity binding, tenant authorization, state bounds, infrastructure integration, and external penetration testing remain outstanding.
+The calculation service has no trip expiry, late-event policy, or event-time ordering. Durable persistence and tenant-aware state are implemented in PostgreSQL mode; local in-memory state is still volatile. It assumes each incoming point is the next point for that OBU. Kafka replay can therefore repeat state transitions unless the consumer and state persistence gain idempotency. Basic malicious-input probes and race detection passed, but Kafka broker authentication, managed device identity, state bounds, credential lifecycle, and external penetration testing remain outstanding.
 
 ## Internal protobuf/gRPC aggregation
 
-The current Kafka-to-aggregator call uses the versioned generated contract described in [Feature 08](features/08-protobuf-grpc-aggregator.md). HTTP `/aggregate` and `/invoice` remain for direct inspection. Review the feature guide before editing the wire schema; field numbers are compatibility identifiers. It also includes focused interview questions on error mapping, deadlines, idempotency and transport trade-offs.
+The current Kafka-to-aggregator call uses the versioned generated contract described in [Feature 08](features/08-protobuf-grpc-aggregator.md). Authenticated HTTP `/aggregate` and tenant-scoped `/invoice` remain for manual inspection. Review the feature guide before editing the wire schema; field numbers are compatibility identifiers. It also includes focused interview questions on error mapping, deadlines, idempotency and transport trade-offs.
 
 # Testing and TDD
 
@@ -75,3 +75,7 @@ No real Kafka or end-to-end test was run for this feature. The calculation path 
 ## Adversarial review notes
 
 Executed unit probes for latitude/longitude bounds, NaN, and invalid OBU IDs; all are rejected before state mutation after the fix. The in-memory map is protected by a mutex and was exercised under the race detector. This does not establish authentication or tenant ownership: the Kafka message's OBU ID is still trusted, so a publisher that can write to the topic can spoof another OBU or grow state with many IDs. Kafka ACLs, device identity binding, bounded state lifecycle, and tenant checks remain open security work. No external penetration test was performed.
+
+## Tenant identity and authorization
+
+Study the end-to-end tenant identity implementation, composite PostgreSQL keys, auth roles, protobuf field compatibility and open security limits in [Feature 09](features/09-tenant-isolation.md). Complete the private review exercises before changing this boundary.

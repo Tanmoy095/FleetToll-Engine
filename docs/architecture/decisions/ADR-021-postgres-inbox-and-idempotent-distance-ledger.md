@@ -35,7 +35,7 @@ The consumer acknowledges Kafka only after its aggregator HTTP call succeeds. `D
 - A database outage stops processing without committing Kafka; the event remains available for retry. A poison event can still block its partition because DLQ handling is not implemented.
 - PostgreSQL serializes processing per numeric OBU key. This provides simple correctness but may constrain a single very hot vehicle key; profile before changing.
 - Each event creates inbox and aggregate rows. Retention, partitioning, archival and deletion policy are future operational work.
-- `eventID` is a Kafka identity, not proof of caller identity. The HTTP endpoints remain unauthenticated; tenant isolation is absent.
+- `eventID` is a Kafka identity, not proof of caller identity. The tenant-auth increment now protects transport boundaries and scopes all store identities; shared-secret and legacy tenant-1 compatibility limits remain.
 - The database transaction and Kafka commit are not atomic together. The design is at-least-once delivery with idempotent database effects, not end-to-end exactly-once processing.
 - A unique index on `event_id` makes deduplication constant-time. The `(obu_id)` index supports invoice filtering at the cost of write amplification and storage.
 - PostgreSQL is shared by the current local services for demonstration. A larger deployment should clarify service ownership and access boundaries.

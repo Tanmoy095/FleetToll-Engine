@@ -8,14 +8,14 @@ I am developing FleetToll to explore a practical logistics and fleet-finance pro
 
 | Capability | Status | Evidence / limits |
 |---|---|---|
-| WebSocket GPS ingestion | Implemented | Bounded frames, strict JSON, coordinate validation, isolated connections; devices are not authenticated |
-| Kafka telemetry publishing | Implemented | OBU-keyed records, idempotent producer configuration; real-broker integration test |
+| WebSocket GPS ingestion | Implemented | Bounded frames, strict JSON, coordinate validation, device bearer credentials, tenant derived from credential, OBU allowlist |
+| Kafka telemetry publishing | Implemented | tenant/OBU-keyed records, idempotent producer configuration; real-broker integration test |
 | Distance calculation | Implemented | Haversine kilometers and per-OBU baseline; volatile fallback remains available when the database is unset |
 | Durable replay-safe processing | Implemented in PostgreSQL mode | Inbox result and trip baseline commit in one transaction; real PostgreSQL tests cover replay after a new service instance |
 | Distance aggregation | Implemented | PostgreSQL event ledger has a unique event ID and sums records for the prototype invoice; duplicate events do not add twice |
 | Internal aggregation RPC | Implemented | Versioned Protocol Buffers contract and gRPC client/server; the Kafka calculator uses gRPC, while HTTP remains for the current demo API |
 | Toll zones and pricing | Planned | PostGIS geometry, tariff versioning and toll assessment are not implemented |
-| Identity and tenant authorization | Planned | OBU ID is currently client-supplied; APIs do not authenticate callers |
+| Identity and tenant authorization | Implemented prototype | Device and tenant bearer credentials; tenant-scoped calculator state, distance ledger, invoice lookup, Kafka key and internal service RPC; provisioning and production identity remain manual |
 | DLQ and operator replay | Planned | A poison Kafka record can still block its partition |
 | Tracing, metrics and dashboards | Planned | Not implemented |
 | Large-scale workload | In progress | A reproducible 1,000-request local API probe is included; it is not a 1,000-WebSocket test or production capacity claim |
@@ -25,7 +25,7 @@ I am developing FleetToll to explore a practical logistics and fleet-finance pro
 ```mermaid
 flowchart LR
   Device[Vehicle device / simulator] -->|WebSocket JSON| Receiver[Receiver]
-  Receiver -->|Kafka record keyed by OBU| Kafka[(Kafka)]
+  Receiver -->|Kafka record keyed by tenant/OBU| Kafka[(Kafka)]
   Kafka -->|topic:partition:offset| Calculator[Distance calculator]
   Calculator -->|inbox + trip state transaction| DB[(PostgreSQL)]
   Calculator -->|gRPC distance + event ID| Aggregator[Aggregator]
@@ -37,10 +37,10 @@ flowchart LR
 ### One telemetry event, end to end
 
 1. A device sends a JSON GPS point to `ws://localhost:30000/ws`.
-2. The receiver checks the OBU identifier and coordinate ranges, caps each frame at 4 KiB, and publishes to Kafka with the OBU ID as key. Kafka keeps a key's records in one partition; it does not provide global ordering.
+2. The receiver authenticates a device token, checks the OBU allowlist and coordinate ranges, caps each frame at 4 KiB, and publishes with `tenantID:OBUID` as the Kafka key. Kafka keeps a tenant/OBU key's records in one partition; it does not provide global ordering.
 3. The consumer forms a stable event identity from the Kafka topic, partition and offset.
-4. With `DATABASE_URL` configured, the calculator starts a PostgreSQL transaction, serializes updates for that OBU using a transaction-scoped advisory lock, checks the processed-event inbox, calculates Haversine distance from the prior point, and commits the result and next point together.
-5. A replay returns the distance saved for that event and does not advance the vehicle baseline again.
+4. With `DATABASE_URL` configured, the calculator starts a PostgreSQL transaction, serializes updates for that OBU using a transaction-scoped tenant/OBU advisory lock, checks the tenant-scoped processed-event inbox, calculates Haversine distance from the prior point, and commits the result and next point together.
+5. Tenant identity comes from a device bearer credential, never the telemetry frame; calculator state is keyed by tenant and OBU. A replay returns the distance saved for that tenant event and does not advance the vehicle baseline again.
 6. The calculator sends the event and distance through `AggregatorService.AggregateDistance` over gRPC. The aggregator inserts into a ledger with a unique event ID. Same-ID/same-data delivery is a no-op; same-ID/different-data delivery is rejected.
 7. The consumer commits the Kafka offset only after the RPC returns success. If a response is lost, redelivery reuses the inbox result and the aggregate ledger deduplicates it.
 
@@ -50,7 +50,7 @@ This is at-least-once delivery with idempotent database effects. Kafka, PostgreS
 
 The business direction is a multi-tenant fleet tolling and revenue-assurance platform. The first engineering slice is intentionally smaller: establish a reliable telemetry-to-distance path before adding financial rules. The current invoice endpoint is a prototype total (`10 × distance`) and uses floating point; it is not a real tariff, currency calculation or immutable financial invoice.
 
-The internal Kafka-to-aggregator call uses gRPC with a versioned Protocol Buffers contract, generated Go client/server code and explicit RPC status codes. HTTP `/aggregate` and `/invoice` remain as simple demo and inspection endpoints. This keeps browser/curl-friendly access while giving service-to-service calls a typed contract. It adds code generation and schema compatibility responsibilities; gRPC is not assumed to be faster for this workload. Kafka buffers telemetry and allows replay across service failures. PostgreSQL is the system of record for trip baselines, processed-event identity and aggregate distance when durable mode is enabled. PostGIS is deferred until toll-zone geometry and spatial queries exist.
+The internal Kafka-to-aggregator call uses gRPC with a versioned Protocol Buffers contract, generated Go client/server code, explicit RPC status codes and a shared service bearer token. HTTP `/aggregate` is service-token protected; `/invoice` requires a tenant operator credential. WebSocket devices use scoped bearer tokens. Tenant IDs are resolved from credentials at ingestion and every database key/query includes tenant scope. This remains a local portfolio prototype: credentials are configured as environment JSON, there is no automated provisioning/rotation, and gRPC uses plaintext transport for loopback only. gRPC adds code generation and schema compatibility responsibilities; it is not assumed to be faster for this workload. Kafka buffers telemetry and allows replay across service failures. PostgreSQL is the system of record for trip baselines, processed-event identity and aggregate distance when durable mode is enabled. PostGIS is deferred until toll-zone geometry and spatial queries exist.
 
 ## Repository layout
 
@@ -80,6 +80,9 @@ PostgreSQL is bound to `127.0.0.1:15432` so it does not collide with a local ser
 For durable mode, export the same DSN in the calculator and aggregator terminals:
 
 ```bash
+# Replace all sample values with unique secrets; never commit them.
+export FLEETTOLL_TENANT_API_KEYS='[{"token":"replace-with-at-least-32-random-bytes-device","tenant_id":1,"role":"device","obu_ids":[12345]},{"token":"replace-with-at-least-32-random-bytes-operator","tenant_id":1,"role":"tenant"}]'
+export AGGREGATOR_GRPC_TOKEN='replace-with-at-least-32-random-bytes-service-token'
 export DATABASE_URL='postgres://fleettoll:fleetdev@localhost:15432/fleettoll?sslmode=disable'
 ```
 
@@ -97,7 +100,9 @@ KAFKA_BROKERS=localhost:9092 KAFKA_TOPIC=obudata AGGREGATOR_GRPC_TARGET=127.0.0.
 KAFKA_BROKERS=localhost:9092 KAFKA_TOPIC=obudata go run ./data_receiver
 ```
 
-The services read environment variables directly and do not load `.env` files. If `DATABASE_URL` is unset, the calculator and aggregator explicitly use volatile in-memory state; restart-safe behavior then does not apply.
+Each service process must receive the required environment variables; export the same tenant-key JSON and gRPC service token in every terminal. The simulator also needs `FLEETTOLL_SIMULATOR_DEVICE_TOKEN` matching one configured device credential. The services read environment variables directly and do not load `.env` files. If `DATABASE_URL` is unset, the calculator and aggregator explicitly use volatile in-memory state; restart-safe behavior then does not apply.
+
+The `FLEETTOLL_TENANT_API_KEYS` JSON supports `device` credentials with an explicit `obu_ids` allowlist and `tenant` credentials for invoice reads. In PostgreSQL mode the configured tenant IDs must already exist in `tenants`; migration seeds tenant 1 as `legacy-local`. Provision additional tenants with an authorized operational process (currently manual SQL). Send the device token as `Authorization: Bearer ...` during the WebSocket handshake. The client frame must not include `tenantID`; the receiver assigns it from the credential.
 
 Example telemetry frame:
 
@@ -108,7 +113,7 @@ Example telemetry frame:
 After two valid points for the same OBU, query the prototype invoice:
 
 ```bash
-curl "http://127.0.0.1:3000/invoice?obu=12345"
+curl -H "Authorization: Bearer $TENANT_API_TOKEN" "http://127.0.0.1:3000/invoice?obu=12345"
 ```
 
 The first point initializes a baseline and contributes zero kilometers. Later points contribute great-circle distance from the preceding accepted point.
@@ -122,7 +127,9 @@ The first point initializes a baseline and contributes zero kilometers. Later po
 | `KAFKA_CONSUMER_GROUP` | `fleettoll-distance-calculator` | Calculator consumer group |
 | `DATABASE_URL` | unset | Enables durable calculator and aggregator PostgreSQL mode |
 | `AGGREGATOR_GRPC_TARGET` | `127.0.0.1:3001` | Internal gRPC target used by the distance calculator |
-| Aggregator `-grpc-listenaddr` | `127.0.0.1:3001` | gRPC listen address; keep loopback-only until authentication/TLS exist |
+| `FLEETTOLL_TENANT_API_KEYS` | required | JSON array of tenant/device credentials; tokens must have at least 32 bytes |
+| `AGGREGATOR_GRPC_TOKEN` | required | Shared internal HTTP/gRPC service bearer token; at least 32 bytes |
+| Aggregator `-grpc-listenaddr` | `127.0.0.1:3001` | Authenticated gRPC listen address; keep loopback-only because transport is plaintext |
 | `KAFKA_TEST_BROKERS` | `localhost:9092` | Real Kafka integration tests |
 | `DATABASE_TEST_URL` | Compose PostgreSQL DSN | Real PostgreSQL integration tests |
 
@@ -190,7 +197,7 @@ Key concepts to be ready to explain:
 
 ## Roadmap
 
-1. Add authenticated device identity and tenant-scoped fleet/vehicle ownership.
+1. Replace prototype shared bearer secrets with managed tenant/device identity, rotation, TLS/mTLS and auditable onboarding; add fleet/vehicle ownership relationships.
 2. Add bounded retry, poison-event handling, a DLQ and operator-controlled replay.
 3. Add PostGIS toll zones, geofence semantics and effective-dated pricing.
 4. Replace prototype amounts with an integer-minor-unit ledger and immutable invoices; add statement reconciliation.
@@ -198,3 +205,9 @@ Key concepts to be ready to explain:
 6. Run failure-injection, 1,000 concurrent API users, 1,000 WebSocket devices and combined load where the development environment permits; profile measured bottlenecks.
 
 The roadmap is a plan, not a completion claim. Each item needs implementation evidence, real integration checks and a security review before its status changes.
+
+### Tenant isolation increment (2026-11-17)
+
+Implemented code and focused tests now cover credential-derived tenant identity, device OBU allowlists, authenticated internal gRPC/aggregate HTTP, tenant-scoped in-memory and PostgreSQL queries, tenant-qualified Kafka keys, and the `002_tenant_scope.sql` migration. Added HTTP regression coverage proving identical OBU and event IDs in two tenants remain isolated. Legacy gRPC requests without `tenant_id` and old Kafka records without `tenantID` map to tenant 1 for migration compatibility. Treat that compatibility path as trusted local ingress; remove it before accepting untrusted producers.
+
+Verification in this environment: full unit suite, race detector, `go vet`, and real PostgreSQL integration passed against a temporary local PostgreSQL cluster; the Kafka broker was unavailable, so Kafka integration remains to be rerun. A fresh in-memory gRPC load result is recorded separately; no PostgreSQL load result is claimed for this increment. Existing 2026-11-16 results above describe the prior revision, not this one. See [ADR-023](docs/architecture/decisions/ADR-023-tenant-isolation-and-auth.md), [tenant security review](docs/security/TENANT_ISOLATION_REVIEW.md), and [learning exercise 09](docs/learning/features/09-tenant-isolation.md).

@@ -35,7 +35,7 @@ The test server required `application/json` and returned 415; a response-body tr
 
 ## Security, performance and limits
 
-The HTTP compatibility call is not authenticated and local configuration is plaintext. The request carries an OBU ID and distance. This client’s timeout avoids indefinite waits but a timeout is ambiguous: the server may have accepted the request. This client does not automatically retry. The current durable ledger has event-ID idempotency, but the HTTP compatibility request does not retry and volatile mode is not restart-safe. These HTTP tests do not measure throughput or latency distribution.
+This guide describes the previous HTTP client, now superseded in the Kafka path by the authenticated protobuf/gRPC client in Feature 08. The retained HTTP aggregate route requires the shared service token; local transport remains plaintext. The request carries an OBU ID and distance. This client’s timeout avoids indefinite waits but a timeout is ambiguous: the server may have accepted the request. This client does not automatically retry. The current durable ledger has event-ID idempotency, but the HTTP compatibility request does not retry and volatile mode is not restart-safe. These HTTP tests do not measure throughput or latency distribution.
 
 ## Interview explanation
 

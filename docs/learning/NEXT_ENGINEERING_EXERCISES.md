@@ -44,3 +44,7 @@ Do not write implementation code yet. The schema and transaction boundary must b
 ## Mentor review checklist
 
 Before moving on, be able to explain why “commit Kafka after HTTP succeeds” is useful but insufficient, and why durable state plus event deduplication must be designed together. The project roadmap puts PostgreSQL next, but the implementation begins after this design checkpoint is understood.
+
+## Exercise 3 — Tenant isolation and authorization
+
+The implementation now includes tenant identity across the receiver, Kafka, calculator state, protobuf/gRPC and aggregator storage. Before changing it, complete the private **Session 5 — Tenant isolation, authorization and migration review** in your personal practice file. Do not commit your answers. Then independently add a real PostgreSQL test for same OBU/event IDs in two tenants, an invoice authorization test, and a focused Go map/slice grouping exercise. Your explanation must cover the shared token trust boundary, the tenant-1 legacy fallback, composite keys, migration locking, and a production identity/rotation design. See [Feature 09](features/09-tenant-isolation.md).

@@ -1,6 +1,6 @@
 # WebSocket ingestion security review
 
-Date: 2026-11-15. Scope: `/ws` handshake and telemetry validation in the local receiver. This is a code review with local protocol tests, not an external penetration test.
+Original review date: 2026-11-15. Status rechecked: 2026-11-17. Scope: `/ws` handshake and telemetry validation in the local receiver. This is a code review with local protocol tests, not an external penetration test.
 
 ## Tested
 
@@ -15,7 +15,7 @@ The tests use a recording producer, not a Kafka broker. They prove receiver prot
 
 ## Open findings
 
-### WS-AUTH-001 — unauthenticated device identity
+### WS-AUTH-001 — unauthenticated device identity (fixed in prototype)
 
 - Severity: High
 - Affected component: `/ws`
@@ -23,9 +23,9 @@ The tests use a recording producer, not a Kafka broker. They prove receiver prot
 - Evidence: valid-message integration test completes a WebSocket handshake without credentials; `handleWS` has no identity check.
 - Reproduction: connect to `ws://<receiver>/ws` without Authorization, then send `{"obuID":7,"lat":51.2,"long":4.4}`.
 - Root cause: device registration/authentication is not implemented.
-- Fix: pending; authenticate device credentials, bind credential to registered vehicle/tenant, support revocation/rotation, and ignore client-supplied identity in favor of authenticated context.
-- Regression test and retest: pending.
-- Remaining risk: telemetry spoofing and cross-tenant attribution.
+- Fix: prototype device credentials now bind to a tenant and OBU allowlist. Receiver derives tenant ID from principal and rejects client tenant fields.
+- Regression test and retest: `TestWebSocketAuthenticatesTenantAndScopesOBU` verifies missing auth, two tenants sharing an OBU ID, and out-of-scope identity; receiver tests pass.
+- Remaining risk: rotation/revocation, TLS, quotas and managed enrollment remain absent; see `TENANT_ISOLATION_REVIEW.md`.
 
 ### WS-RESOURCE-002 — no connection or message-rate quotas
 
@@ -49,3 +49,6 @@ The tests use a recording producer, not a Kafka broker. They prove receiver prot
 - Remaining risk: GPS confidentiality and integrity on shared networks.
 
 Origin validation is a browser cross-site defense only. Missing Origin is allowed for native clients, so it cannot substitute for authentication. No SQL layer exists in this feature. No external network scan or vulnerability scanner was run.
+
+
+The unauthenticated finding above is historical and fixed in the prototype. Review [TENANT_ISOLATION_REVIEW.md](TENANT_ISOLATION_REVIEW.md) for current controls and open risks.

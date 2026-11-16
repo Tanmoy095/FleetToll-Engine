@@ -18,7 +18,7 @@ flowchart LR
 - `kafkaBrokersFromEnv` reads `KAFKA_BROKERS`, defaulting to `localhost:9092`.
 - `kafkaTopicFromEnv` reads `KAFKA_TOPIC`, defaulting to `obudata`.
 - `NewKafkaProducer` rejects an empty topic, configures `enable.idempotence=true`, `acks=all`, and a 15-second message timeout, then starts an event-reader goroutine.
-- `ProduceData` validates OBU ID and coordinates, JSON-encodes the point, sets record `Key` to the decimal OBU ID, enqueues the message, and waits for the per-record delivery event.
+- `ProduceData` validates OBU ID and coordinates, JSON-encodes the point, sets record `Key` to `tenantID:OBUID` so equal OBU IDs from different fleets do not share a partition key, enqueues the message, and waits for the per-record delivery event.
 - Same-key messages map to the same partition under Kafka's default keyed partitioner. Kafka preserves order in one partition; it does not impose order across partitions.
 - `Close` flushes outstanding messages and closes the Confluent client. The receiver process does not yet implement a full graceful shutdown path that guarantees this method is called after all WebSocket connections stop.
 - The `integration` build-tag test creates a unique temporary topic and uses a real consumer to assert the key and JSON payload.

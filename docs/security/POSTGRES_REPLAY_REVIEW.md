@@ -1,6 +1,6 @@
 # PostgreSQL replay-safety security review
 
-**Scope:** event identity validation, PostgreSQL query construction, duplicate writes and transaction ordering for the durable distance slice. **Environment:** local PostgreSQL 15 Compose service; automated integration tests only. This is not an external penetration test or a review of the entire application.
+**Status rechecked:** 2026-11-17. **Scope:** event identity validation, PostgreSQL query construction, duplicate writes and transaction ordering for the durable distance slice. **Environment:** local PostgreSQL 15 Compose service; automated integration tests only. This is not an external penetration test or a review of the entire application.
 
 ## Findings and evidence
 
@@ -10,7 +10,7 @@
 | FT-DB-02 | High, fixed for this slice | Replay after calculator state advancement could return a different distance | Durable integration test replays the same event through a newly created calculator instance and confirms it returns the first saved distance; following point still measures about 111.195 km | Inbox result and trip baseline commit in one transaction |
 | FT-DB-03 | Medium, mitigated | SQL injection-shaped event ID could escape into SQL | Real PostgreSQL integration test inserts `event'); DROP TABLE aggregated_distance_events; --` and verifies the table remains queryable | All values use pgx bound parameters; values are still bounded to 512 bytes |
 | FT-DB-04 | Medium, fixed | Reusing an event ID with different vehicle or distance could silently hide data | Unit and PostgreSQL tests reuse an ID with a changed distance | Store rejects mismatch as `ErrEventIDConflict`; poison-event handling still requires operator intervention |
-| FT-DB-05 | High, open | Aggregator and invoice routes have no authentication or tenant authorization | Code inspection: `/aggregate` accepts any reachable caller; `/invoice?obu=` accepts caller-selected IDs | Add authenticated server-owned tenant/device identity and tenant-scoped authorization before external deployment |
+| FT-DB-05 | High before tenant feature; mitigated for prototype | The original review found aggregate/invoice routes had no authentication | Tenant feature now protects aggregation with a service token and invoice reads with tenant credentials; cross-tenant HTTP regression tests pass | Managed identity, credential lifecycle, TLS/mTLS and external threat review remain open; see `TENANT_ISOLATION_REVIEW.md` |
 | FT-DB-06 | High, open | Kafka local listener and PostgreSQL Compose credentials are development-only | Compose exposes plaintext Kafka locally and uses a static local-only PostgreSQL password | Restrict to local development; deployment requires TLS/SASL/ACL, secrets, network policy and database roles |
 | FT-DB-07 | Medium, open | Poison telemetry/conflicting identity can stop the consumer partition | Consumer intentionally exits without offset commit on processing errors; no DLQ or bounded retry is present | Add retry/DLQ and audited replay after persistence and authorization policy are established |
 
@@ -22,4 +22,4 @@
 - Real Kafka integration remains separately covered by `make integration-kafka`.
 - Race detection, static analysis and a measured 1,000-request API probe are recorded in the repository README after execution.
 
-No credentials, tenant IDs or GPS coordinates are emitted in the new persistence error messages. The existing APIs are still unauthenticated and must not be exposed publicly as a production service.
+No credentials, tenant IDs or GPS coordinates are emitted in the new persistence error messages. The prototype APIs now require route credentials and tenant-scoped invoice access. The controls are shared-secret and local-development grade; consult `TENANT_ISOLATION_REVIEW.md` before any exposure.

@@ -1,6 +1,6 @@
 # FleetToll Engine high-level design
 
-**Status:** describes the current prototype as of 2026-11-16. PostgreSQL inbox/trip-state and distance-ledger components are implemented when `DATABASE_URL` is set. The internal calculator-to-aggregator call now uses gRPC; other planned components are not implemented.
+**Status:** describes the current prototype as of 2026-11-17. PostgreSQL inbox/trip-state and distance-ledger components are implemented when `DATABASE_URL` is set. The internal calculator-to-aggregator call now uses gRPC; other planned components are not implemented.
 
 ## Business purpose
 
@@ -10,8 +10,8 @@ FleetToll is being developed toward a multi-tenant fleet tolling and revenue-ass
 
 ```mermaid
 flowchart LR
-  Device[Vehicle device or simulator] -->|WebSocket JSON| Receiver[Data receiver]
-  Receiver -->|keyed telemetry record| Kafka[(Kafka)]
+  Device[Vehicle device + bearer credential] -->|WebSocket JSON + auth| Receiver[Data receiver]
+  Receiver -->|tenant:OBU keyed telemetry| Kafka[(Kafka)]
   Kafka -->|consumer group| Calculator[Distance calculator]
   Calculator -->|inbox + trip state transaction| DB[(PostgreSQL)]
   Calculator -->|gRPC distance + event ID| Aggregator[Aggregator]
@@ -29,7 +29,7 @@ flowchart LR
 | `aggregator` | Validate/idempotently store distance events and serve prototype invoice totals | PostgreSQL `aggregated_distance_events` when configured; otherwise memory | gRPC internal service; HTTP demo/query API |
 | `obu` | Generate sample device traffic | Simulator process | WebSocket client; current random coordinate generator needs correction |
 
-Tenant and auth services, toll zones, a financial invoice ledger, reconciliation and tracing/metrics are not implemented. PostgreSQL currently stores telemetry processing state and distance events only.
+Tenant isolation and prototype bearer-token authentication are implemented in the telemetry, invoice and internal aggregation paths. A managed identity/auth service, credential rotation, TLS/mTLS, toll zones, a financial invoice ledger, reconciliation and tracing/metrics are not implemented. PostgreSQL currently stores telemetry processing state and distance events only.
 
 ## Event workflow
 
@@ -62,7 +62,7 @@ If aggregation returns an error, the consumer stops without committing the recor
 - Kafka offset commit, PostgreSQL processing and gRPC aggregation do not share one transaction. This is at-least-once delivery with idempotent database effects, not exactly-once processing or financial billing.
 - If `DATABASE_URL` is unset, both services use volatile in-memory stores and restart-safe behavior does not apply.
 
-The internal RPC uses the versioned source contract at `api/fleettoll/v1/aggregator.proto`, with generated Go bindings checked in and a local-only insecure transport. The HTTP endpoints remain for manual inspection. Tenant, fleet, vehicle, and device records must establish server-side identity before tenant authorization is claimed. PostGIS is planned for toll-zone geometry, but no spatial schema exists yet.
+The internal RPC uses the versioned source contract at `api/fleettoll/v1/aggregator.proto`, generated Go bindings and a service bearer token. The transport remains plaintext and should bind only to loopback. The receiver authenticates device bearer credentials, checks OBU allowlists and assigns tenant identity server-side. Invoice HTTP reads authenticate tenant credentials; aggregate HTTP and internal gRPC require the service token. Database primary keys, queries and invoice totals include tenant scope. Tenant 1 is seeded for migration compatibility; other tenant rows are manually provisioned. PostGIS is planned for toll-zone geometry, but no spatial schema exists yet.
 
 ## Scaling and operations
 
@@ -72,9 +72,9 @@ The local Compose setup uses a single plaintext Kafka broker and ZooKeeper plus 
 
 ## Security boundaries
 
-- WebSocket payloads are bounded and validated, but the device supplies its own OBU ID and is not authenticated.
-- The aggregator has no authentication or tenant authorization.
-- The gRPC listener defaults to loopback and uses plaintext credentials; changing the bind address can expose unauthenticated RPCs to a network.
+- WebSocket payloads are bounded and validated. Device credentials establish tenant identity and constrain accepted OBU IDs; the client still supplies an OBU ID within that allowlist.
+- Authentication is shared-secret prototype authentication. No automatic provisioning, rotation, TLS/mTLS, per-service identity, revocation or audit trail exists; compatibility fallback maps legacy missing tenant IDs to tenant 1.
+- The gRPC listener defaults to loopback and uses plaintext transport plus a shared service token; changing the bind address can expose credentials and service operations to network interception.
 - Kafka has no TLS/SASL credentials or ACLs in the local environment.
 - Same-origin validation is a browser defense, not device authentication.
 - No TLS termination, rate/connection quotas, credential lifecycle, or audit trail is deployed.
@@ -83,9 +83,9 @@ These are open findings in `docs/security/`; no external penetration test is cla
 
 ## Intended evolution
 
-1. Authenticated device and user identity, tenant authorization, audit events and rate limits.
+1. Managed device and operator identity, secret rotation, TLS/mTLS, audit events, rate limits and removal of tenant-1 compatibility fallbacks.
 2. Bounded retry, DLQ and operator replay.
-4. PostGIS toll polygons, tariff versions, toll assessment, integer-minor-unit ledger and immutable invoices.
-5. Reconciliation workflows, OpenTelemetry, Prometheus/Grafana, SLOs, end-to-end tests, and measured load.
+3. PostGIS toll polygons, tariff versions, toll assessment, integer-minor-unit ledger and immutable invoices.
+4. Reconciliation workflows, OpenTelemetry, Prometheus/Grafana, SLOs, end-to-end tests, and measured load.
 
 Each step depends on real integration and security evidence; the diagram above remains the source of truth until those components exist.

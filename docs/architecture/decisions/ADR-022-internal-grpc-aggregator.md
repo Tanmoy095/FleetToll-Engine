@@ -17,12 +17,12 @@ Map malformed input to `InvalidArgument`, conflicting event identity to `Already
 
 1. Keep HTTP only: lower setup cost, but this misses the typed interface and generated service contract the system needs to demonstrate.
 2. Replace HTTP completely: rejected because the HTTP invoice endpoint is useful for people, curl and the existing local demo.
-3. Add reflection and expose gRPC broadly: rejected because there is no auth, tenant authorization or TLS yet; reflection also reveals service schema to any reachable caller.
+3. Add reflection and expose gRPC broadly: rejected because the prototype still uses shared-secret auth and plaintext transport; reflection also reveals service schema to any reachable caller.
 4. Add streaming or a gateway: deferred; current interaction is one distance event per request and no measured need justifies the extra complexity.
 
 ## Consequences
 
-The internal call has typed messages, generated clients and language-neutral schema. The system now owns protobuf compatibility, code-generation tool versions and another listener. This change does not claim lower latency or higher throughput than HTTP. gRPC's listener is local-only by default; an override can expose unauthenticated plaintext RPC and must be guarded at deployment.
+The internal call has typed messages, generated clients and language-neutral schema. The system now owns protobuf compatibility, code-generation tool versions and another listener. This change does not claim lower latency or higher throughput than HTTP. gRPC's listener is local-only by default and now protected by a shared service bearer token; transport remains plaintext, and an override must be guarded at deployment.
 
 The server adapter delegates to the existing domain service, so idempotency stays in the event ledger. The current service/store interfaces lack context parameters; a cancelled RPC may not stop an already-running PostgreSQL operation. Add context propagation before relying on deadlines for database resource control.
 
@@ -32,4 +32,4 @@ The focused transport tests use a generated client over loopback TCP and verify 
 
 ## Revisit when
 
-Add authentication/TLS before remote deployment. Revisit request shape and compatibility policy before adding tenant identity, batch requests, currency amounts or long-lived streaming.
+Replace shared token auth and add TLS/mTLS before remote deployment. Tenant identity is now part of the request; revisit compatibility policy before batch requests, currency amounts or long-lived streaming.

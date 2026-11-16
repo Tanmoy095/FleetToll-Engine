@@ -38,11 +38,11 @@ The new `make tdd PKG=... TEST=...` target runs a focused named Go test; it is a
 
 ## Remaining verification
 
-No real Kafka or end-to-end test was run for this feature. The calculation path is a pure in-process service, and its state behavior has unit and race coverage; the consumer-to-aggregator delivery boundary still lacks infrastructure-backed integration tests. No penetration test, load test, or 1,000-device workload was run. This feature is therefore **IMPLEMENTED BUT NOT FULLY VERIFIED** under the master prompt's completion criteria.
+Historical checkpoint status: the original pure calculation slice lacked infrastructure integration. Later PostgreSQL replay and gRPC/Kafka integration work is documented in the implementation roadmap. On the 2026-11-17 tenant increment, PostgreSQL tests passed using an isolated temporary cluster; Kafka was unavailable. This is still not an external penetration test or a 1,000-device workload.
 
 ## Adversarial review notes
 
-Executed unit probes for latitude/longitude bounds, NaN, and invalid OBU IDs; all are rejected before state mutation after the fix. The in-memory map is protected by a mutex and was exercised under the race detector. This does not establish authentication or tenant ownership: the Kafka message's OBU ID is still trusted, so a publisher that can write to the topic can spoof another OBU or grow state with many IDs. Kafka ACLs, device identity binding, bounded state lifecycle, and tenant checks remain open security work. No external penetration test was performed.
+Executed unit probes for latitude/longitude bounds, NaN, and invalid OBU IDs; all are rejected before state mutation after the fix. The in-memory map is protected by a mutex and was exercised under the race detector. The tenant-auth increment now checks device credential OBU scope at the WebSocket boundary and uses tenant/OBU state keys. A publisher with direct Kafka access can still spoof messages because Kafka ACLs are absent; managed identity, bounded state lifecycle and external review remain open. No external penetration test was performed.
 
 ## Aggregator HTTP boundary
 
@@ -60,7 +60,7 @@ The production mux and handlers now apply the request contract, service validati
 - `GOCACHE=/tmp/fleettoll-go-cache go test -race ./...` — passed, including 40 concurrent aggregate writes; non-fatal macOS linker warning for the distance test binary.
 - `GOCACHE=/tmp/fleettoll-go-cache go vet ./...` — passed.
 
-The API still has no authentication or tenant authorization; see `docs/security/HTTP_API_REVIEW.md`. The feature is not security-complete. No 1,000-user load test was run.
+At the time this checkpoint was written, the API lacked auth. The tenant-auth increment now protects aggregate/invoice routes and scopes invoice reads; see `docs/security/TENANT_ISOLATION_REVIEW.md` for current controls and remaining risks. No external penetration test is claimed.
 
 ## WebSocket telemetry ingestion
 
@@ -128,4 +128,4 @@ The wire contract and full learning walkthrough are in `features/08-protobuf-grp
 - `make generate-proto` — completed with no generated-file diff after the final schema change.
 - One-shot 1,000-call PostgreSQL-backed gRPC probe — 1,000 successes, zero errors, p95 319.9 ms. See the performance note for hardware and limitations.
 
-The first test attempts were blocked by the restricted module cache and loopback policy; they were rerun after approved dependency and local-network access. The open security findings are unauthenticated plaintext RPC if exposed beyond loopback and missing context propagation into the current SQL service interfaces. This is not an external penetration test or production readiness claim.
+The first test attempts were blocked by the restricted module cache and loopback policy; they were rerun after approved dependency and local-network access. The current open security findings include plaintext transport if exposed beyond loopback, shared-secret lifecycle limits, missing context propagation into SQL interfaces, and no rate limits. This is not an external penetration test or production readiness claim.

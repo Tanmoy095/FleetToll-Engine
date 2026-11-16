@@ -67,7 +67,7 @@ GREEN tests use real WebSocket handshakes and frames against an `httptest.Server
 
 Cross-origin browser upgrade was rejected with HTTP 403. Invalid coordinate, missing field, unknown field and over-limit frame cases did not reach the producer. Logs were tested to exclude OBU ID and coordinate values.
 
-Open findings are recorded in [WEBSOCKET_REVIEW.md](../../security/WEBSOCKET_REVIEW.md). Highest risk is unauthenticated device identity: any client can omit Origin and submit a different OBU ID. No external scanner or penetration test was run. TLS, per-device rate limits and connection quotas are also absent.
+Device bearer authentication, credential role checks, tenant assignment and OBU allowlists were added in Feature 09. Missing/invalid tokens and out-of-scope OBU IDs fail closed. Remaining risks (plaintext local transport, secret rotation, rate limits and connection quotas) are listed in [TENANT_ISOLATION_REVIEW.md](../../security/TENANT_ISOLATION_REVIEW.md). No external scanner or penetration test was run.
 
 ## Performance and reliability limits
 

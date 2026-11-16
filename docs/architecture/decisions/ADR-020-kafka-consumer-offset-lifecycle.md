@@ -35,7 +35,7 @@ Successful downstream writes are followed by an explicit group offset commit. Fa
 
 ## Security implications
 
-Kafka payload identity is still trusted and broker transport is still plaintext without authentication or ACLs in the local Compose environment. A producer with topic access can spoof OBU IDs. This decision adds no tenant or device authentication.
+Kafka payload identity is still trusted and broker transport is still plaintext without authentication or ACLs in the local Compose environment. A producer with topic access can spoof OBU IDs. This decision originally added no tenant or device authentication; prototype device auth and tenant scoping were added later in ADR-023. Kafka broker authentication/ACLs remain open.
 
 ## Operational and testing implications
 

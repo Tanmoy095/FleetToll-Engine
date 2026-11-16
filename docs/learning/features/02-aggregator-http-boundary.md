@@ -18,7 +18,7 @@ flowchart LR
   S -->|invoice| H
 ```
 
-This is still one aggregator process with in-memory storage. The `MemoryStore` is a demonstration adapter, not durable persistence.
+The HTTP adapter remains available for aggregate operations and invoice inspection. It uses PostgreSQL when `DATABASE_URL` is set and in-memory storage otherwise. `/aggregate` requires the internal service bearer token; `/invoice` requires a tenant-role bearer credential and scopes the query to that tenant.
 
 ## LLD and API contract
 
@@ -69,7 +69,7 @@ Commands and actual results:
 
 Automated adversarial cases sent wrong methods, missing/unsupported media types, malformed JSON, unknown fields, trailing JSON, a body larger than 1 MiB, negative distance, zero/repeated OBU IDs and an unknown invoice ID. They were rejected with 405, 415, 400, 413 or 404 as appropriate. A failing storage adapter was exercised; it returns 500 without crashing the server. Concurrent writes were checked under the race detector.
 
-**Open finding FT-API-001 — high severity:** the API has no authentication or tenant authorization. A client able to reach `:3000` can submit arbitrary distances for a guessed OBU ID and read invoice totals for any OBU. Regression tests proving auth are not yet implemented; fix belongs to the upcoming identity/tenant authorization feature. No scanner or external penetration test was run. This feature is not security-complete.
+**Historical finding FT-API-001 — fixed in the tenant-auth increment:** aggregate writes now require the internal service bearer token; invoice reads require tenant credentials and use tenant-scoped storage queries. Focused tests cover missing/unknown credentials, device-role rejection and cross-tenant invoice isolation. Remaining risks are documented in [TENANT_ISOLATION_REVIEW.md](../../security/TENANT_ISOLATION_REVIEW.md). This is not an external penetration test.
 
 SQL injection does not apply to this in-memory store, and no SQL layer exists here. Do not infer database security from these tests.
 
@@ -91,4 +91,4 @@ Questions to practice:
 
 ## Exercise
 
-Add a table-driven test for fractional `obu` query strings, overflow-sized integers and malformed percent encoding. Then propose a tenant-aware invoice API where tenant identity comes from verified auth context, not from a query parameter.
+Add a table-driven test for fractional `obu` query strings, overflow-sized integers and malformed percent encoding. Explain how tenant identity comes from authenticated context and why it must not be supplied in a query parameter. Then identify one migration step from shared environment secrets to a managed identity provider.
