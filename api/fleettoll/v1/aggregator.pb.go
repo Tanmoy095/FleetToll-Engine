@@ -27,6 +27,7 @@ type AggregateDistanceRequest struct {
 	ObuId         int64                  `protobuf:"varint,2,opt,name=obu_id,json=obuId,proto3" json:"obu_id,omitempty"`
 	DistanceKm    float64                `protobuf:"fixed64,3,opt,name=distance_km,json=distanceKm,proto3" json:"distance_km,omitempty"`
 	EventUnixNano int64                  `protobuf:"varint,4,opt,name=event_unix_nano,json=eventUnixNano,proto3" json:"event_unix_nano,omitempty"`
+	TenantId      int64                  `protobuf:"varint,5,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -89,6 +90,13 @@ func (x *AggregateDistanceRequest) GetEventUnixNano() int64 {
 	return 0
 }
 
+func (x *AggregateDistanceRequest) GetTenantId() int64 {
+	if x != nil {
+		return x.TenantId
+	}
+	return 0
+}
+
 type AggregateDistanceResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Accepted      bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
@@ -136,6 +144,7 @@ func (x *AggregateDistanceResponse) GetAccepted() bool {
 type GetInvoiceRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ObuId         int64                  `protobuf:"varint,1,opt,name=obu_id,json=obuId,proto3" json:"obu_id,omitempty"`
+	TenantId      int64                  `protobuf:"varint,2,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -177,11 +186,19 @@ func (x *GetInvoiceRequest) GetObuId() int64 {
 	return 0
 }
 
+func (x *GetInvoiceRequest) GetTenantId() int64 {
+	if x != nil {
+		return x.TenantId
+	}
+	return 0
+}
+
 type GetInvoiceResponse struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	ObuId           int64                  `protobuf:"varint,1,opt,name=obu_id,json=obuId,proto3" json:"obu_id,omitempty"`
 	TotalDistanceKm float64                `protobuf:"fixed64,2,opt,name=total_distance_km,json=totalDistanceKm,proto3" json:"total_distance_km,omitempty"`
 	TotalAmount     float64                `protobuf:"fixed64,3,opt,name=total_amount,json=totalAmount,proto3" json:"total_amount,omitempty"`
+	TenantId        int64                  `protobuf:"varint,4,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -237,25 +254,35 @@ func (x *GetInvoiceResponse) GetTotalAmount() float64 {
 	return 0
 }
 
+func (x *GetInvoiceResponse) GetTenantId() int64 {
+	if x != nil {
+		return x.TenantId
+	}
+	return 0
+}
+
 var File_api_fleettoll_v1_aggregator_proto protoreflect.FileDescriptor
 
 const file_api_fleettoll_v1_aggregator_proto_rawDesc = "" +
 	"\n" +
-	"!api/fleettoll/v1/aggregator.proto\x12\ffleettoll.v1\"\x95\x01\n" +
+	"!api/fleettoll/v1/aggregator.proto\x12\ffleettoll.v1\"\xb2\x01\n" +
 	"\x18AggregateDistanceRequest\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x15\n" +
 	"\x06obu_id\x18\x02 \x01(\x03R\x05obuId\x12\x1f\n" +
 	"\vdistance_km\x18\x03 \x01(\x01R\n" +
 	"distanceKm\x12&\n" +
-	"\x0fevent_unix_nano\x18\x04 \x01(\x03R\reventUnixNano\"7\n" +
+	"\x0fevent_unix_nano\x18\x04 \x01(\x03R\reventUnixNano\x12\x1b\n" +
+	"\ttenant_id\x18\x05 \x01(\x03R\btenantId\"7\n" +
 	"\x19AggregateDistanceResponse\x12\x1a\n" +
-	"\baccepted\x18\x01 \x01(\bR\baccepted\"*\n" +
+	"\baccepted\x18\x01 \x01(\bR\baccepted\"G\n" +
 	"\x11GetInvoiceRequest\x12\x15\n" +
-	"\x06obu_id\x18\x01 \x01(\x03R\x05obuId\"z\n" +
+	"\x06obu_id\x18\x01 \x01(\x03R\x05obuId\x12\x1b\n" +
+	"\ttenant_id\x18\x02 \x01(\x03R\btenantId\"\x97\x01\n" +
 	"\x12GetInvoiceResponse\x12\x15\n" +
 	"\x06obu_id\x18\x01 \x01(\x03R\x05obuId\x12*\n" +
 	"\x11total_distance_km\x18\x02 \x01(\x01R\x0ftotalDistanceKm\x12!\n" +
-	"\ftotal_amount\x18\x03 \x01(\x01R\vtotalAmount2\xca\x01\n" +
+	"\ftotal_amount\x18\x03 \x01(\x01R\vtotalAmount\x12\x1b\n" +
+	"\ttenant_id\x18\x04 \x01(\x03R\btenantId2\xca\x01\n" +
 	"\x11AggregatorService\x12d\n" +
 	"\x11AggregateDistance\x12&.fleettoll.v1.AggregateDistanceRequest\x1a'.fleettoll.v1.AggregateDistanceResponse\x12O\n" +
 	"\n" +

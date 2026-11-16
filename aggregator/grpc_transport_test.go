@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	fleettollv1 "github.com/Tanmoy095/FleetToll-Engine/api/fleettoll/v1"
+	"github.com/Tanmoy095/FleetToll-Engine/internal/tenantauth"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -21,7 +22,7 @@ func TestGRPCAggregatorRoundTripAndReplay(t *testing.T) {
 	defer server.Stop()
 	defer conn.Close()
 	client := fleettollv1.NewAggregatorServiceClient(conn)
-	ctx := context.Background()
+	ctx := tenantauth.WithServiceToken(context.Background(), testServiceToken)
 
 	const largeOBUID int64 = 1<<31 + 7
 	request := &fleettollv1.AggregateDistanceRequest{EventId: "topic:0:12", ObuId: largeOBUID, DistanceKm: 4.25, EventUnixNano: 1700000000000000000}
@@ -45,7 +46,7 @@ func TestGRPCAggregatorMapsInvalidConflictAndNotFound(t *testing.T) {
 	defer server.Stop()
 	defer conn.Close()
 	client := fleettollv1.NewAggregatorServiceClient(conn)
-	ctx := context.Background()
+	ctx := tenantauth.WithServiceToken(context.Background(), testServiceToken)
 
 	for _, invalid := range []*fleettollv1.AggregateDistanceRequest{
 		{ObuId: 1},
@@ -69,12 +70,32 @@ func TestGRPCAggregatorMapsInvalidConflictAndNotFound(t *testing.T) {
 	assertGRPCCode(t, err, codes.NotFound)
 }
 
+func TestGRPCAggregatorRequiresServiceCredential(t *testing.T) {
+	_, server, conn := startGRPCTestServer(t, NewInvoiceAggregator(NewMemoryStore()))
+	defer server.Stop()
+	defer conn.Close()
+	client := fleettollv1.NewAggregatorServiceClient(conn)
+	request := &fleettollv1.AggregateDistanceRequest{TenantId: 1, EventId: "topic:0:1", ObuId: 1, DistanceKm: 1, EventUnixNano: 1700000000000000000}
+	for name, ctx := range map[string]context.Context{
+		"missing": context.Background(),
+		"wrong":   tenantauth.WithServiceToken(context.Background(), "wrong-service-token-0123456789abcdef"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := client.AggregateDistance(ctx, request)
+			assertGRPCCode(t, err, codes.Unauthenticated)
+		})
+	}
+	if _, err := client.AggregateDistance(tenantauth.WithServiceToken(context.Background(), testServiceToken), request); err != nil {
+		t.Fatalf("valid service token: %v", err)
+	}
+}
+
 func TestGRPCAggregatorRejectsOversizedMessage(t *testing.T) {
 	_, server, conn := startGRPCTestServer(t, NewInvoiceAggregator(NewMemoryStore()))
 	defer server.Stop()
 	defer conn.Close()
 	client := fleettollv1.NewAggregatorServiceClient(conn)
-	_, err := client.AggregateDistance(context.Background(), &fleettollv1.AggregateDistanceRequest{EventId: strings.Repeat("x", maxAggregateBodyBytes), ObuId: 1, DistanceKm: 1, EventUnixNano: 1700000000000000000})
+	_, err := client.AggregateDistance(tenantauth.WithServiceToken(context.Background(), testServiceToken), &fleettollv1.AggregateDistanceRequest{EventId: strings.Repeat("x", maxAggregateBodyBytes), ObuId: 1, DistanceKm: 1, EventUnixNano: 1700000000000000000})
 	assertGRPCCode(t, err, codes.ResourceExhausted)
 }
 
@@ -84,7 +105,7 @@ func TestGRPCAggregatorDoesNotLeakStorageErrors(t *testing.T) {
 	defer server.Stop()
 	defer conn.Close()
 	client := fleettollv1.NewAggregatorServiceClient(conn)
-	_, err := client.AggregateDistance(context.Background(), &fleettollv1.AggregateDistanceRequest{EventId: "topic:0:1", ObuId: 1, DistanceKm: 2, EventUnixNano: 1700000000000000000})
+	_, err := client.AggregateDistance(tenantauth.WithServiceToken(context.Background(), testServiceToken), &fleettollv1.AggregateDistanceRequest{EventId: "topic:0:1", ObuId: 1, DistanceKm: 2, EventUnixNano: 1700000000000000000})
 	assertGRPCCode(t, err, codes.Internal)
 	if got := status.Convert(err).Message(); got != "could not aggregate distance" {
 		t.Fatalf("error message = %q, want sanitized message", got)
@@ -97,7 +118,7 @@ func startGRPCTestServer(t *testing.T, svc Aggregator) (net.Listener, *grpc.Serv
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := newGRPCServer(svc)
+	server := newGRPCServer(svc, testServiceToken)
 	go func() { _ = server.Serve(listener) }()
 	conn, err := grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {

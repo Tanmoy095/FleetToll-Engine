@@ -58,7 +58,7 @@ func TestKafkaConsumerProcessesRealTelemetryIntoAggregator(t *testing.T) {
 	go func() { _ = rpcServer.Serve(listener) }()
 	defer rpcServer.Stop()
 	defer listener.Close()
-	aggregatorClient, err := client.DialGRPC(ctx, listener.Addr().String())
+	aggregatorClient, err := client.DialGRPC(ctx, listener.Addr().String(), "service-test-token-0123456789abcdef")
 	if err != nil {
 		t.Fatalf("create aggregator gRPC client: %v", err)
 	}
@@ -74,8 +74,8 @@ func TestKafkaConsumerProcessesRealTelemetryIntoAggregator(t *testing.T) {
 	}
 	defer producer.Close()
 
-	first := types.OBUData{OBUID: 71, Latitude: 0, Longitude: 0}
-	second := types.OBUData{OBUID: 71, Latitude: 0, Longitude: 1}
+	first := types.OBUData{TenantID: types.LegacyTenantID, OBUID: 71, Latitude: 0, Longitude: 0}
+	second := types.OBUData{TenantID: types.LegacyTenantID, OBUID: 71, Latitude: 0, Longitude: 1}
 	produceTelemetry := func(data types.OBUData) error {
 		payload, err := json.Marshal(data)
 		if err != nil {
@@ -141,6 +141,6 @@ type recordingIntegrationAggregator struct {
 }
 
 func (s *recordingIntegrationAggregator) AggregateDistance(_ context.Context, request *fleettollv1.AggregateDistanceRequest) (*fleettollv1.AggregateDistanceResponse, error) {
-	s.aggregated <- types.Distance{EventID: request.GetEventId(), OBUID: int(request.GetObuId()), Value: request.GetDistanceKm(), Unix: request.GetEventUnixNano()}
+	s.aggregated <- types.Distance{TenantID: types.LegacyTenantID, EventID: request.GetEventId(), OBUID: int(request.GetObuId()), Value: request.GetDistanceKm(), Unix: request.GetEventUnixNano()}
 	return &fleettollv1.AggregateDistanceResponse{Accepted: true}, nil
 }

@@ -13,7 +13,7 @@ import (
 )
 
 func TestAggregateInvoiceSendsJSONToHTTPService(t *testing.T) {
-	want := types.Distance{EventID: "obudata:0:1", OBUID: 42, Value: 3.25, Unix: 1700000000}
+	want := types.Distance{TenantID: types.LegacyTenantID, EventID: "obudata:0:1", OBUID: 42, Value: 3.25, Unix: 1700000000}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Errorf("method = %s, want POST", r.Method)
@@ -58,7 +58,7 @@ func TestAggregateInvoiceClosesResponseBody(t *testing.T) {
 	c.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Body: body, Header: make(http.Header)}, nil
 	})}
-	if err := c.AggregateInvoice(types.Distance{EventID: "obudata:0:2", OBUID: 3, Value: 1, Unix: 1}); err != nil {
+	if err := c.AggregateInvoice(types.Distance{TenantID: types.LegacyTenantID, EventID: "obudata:0:2", OBUID: 3, Value: 1, Unix: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if !body.closed {
@@ -74,7 +74,7 @@ func TestAggregateInvoiceUsesHTTPClientTimeout(t *testing.T) {
 	defer server.Close()
 	c := NewClient(server.URL)
 	c.HTTPClient = &http.Client{Timeout: 10 * time.Millisecond}
-	if err := c.AggregateInvoice(types.Distance{EventID: "obudata:0:3", OBUID: 3, Value: 1, Unix: 1}); err == nil {
+	if err := c.AggregateInvoice(types.Distance{TenantID: types.LegacyTenantID, EventID: "obudata:0:3", OBUID: 3, Value: 1, Unix: 1}); err == nil {
 		t.Fatal("expected request timeout")
 	}
 }

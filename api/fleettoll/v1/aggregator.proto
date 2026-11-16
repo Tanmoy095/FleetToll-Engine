@@ -16,6 +16,7 @@ message AggregateDistanceRequest {
   int64 obu_id = 2;
   double distance_km = 3;
   int64 event_unix_nano = 4;
+  int64 tenant_id = 5;
 }
 
 message AggregateDistanceResponse {
@@ -24,10 +25,12 @@ message AggregateDistanceResponse {
 
 message GetInvoiceRequest {
   int64 obu_id = 1;
+  int64 tenant_id = 2;
 }
 
 message GetInvoiceResponse {
   int64 obu_id = 1;
   double total_distance_km = 2;
   double total_amount = 3;
+  int64 tenant_id = 4;
 }

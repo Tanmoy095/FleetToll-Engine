@@ -34,18 +34,18 @@ func TestGRPCClientSendsTypedDistanceAndHonorsContext(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	client, err := DialGRPC(ctx, listener.Addr().String())
+	client, err := DialGRPC(ctx, listener.Addr().String(), "service-test-token-0123456789abcdef")
 	if err != nil {
 		t.Fatalf("DialGRPC() error = %v", err)
 	}
 	t.Cleanup(func() { _ = client.Close() })
 
-	want := types.Distance{EventID: "obudata:2:8", OBUID: 17, Value: 12.75, Unix: 1700000000000000000}
+	want := types.Distance{TenantID: types.LegacyTenantID, EventID: "obudata:2:8", OBUID: 17, Value: 12.75, Unix: 1700000000000000000}
 	if err := client.AggregateInvoiceContext(ctx, want); err != nil {
 		t.Fatalf("AggregateInvoiceContext() error = %v", err)
 	}
 	got := <-service.got
-	if got.GetEventId() != want.EventID || got.GetObuId() != int64(want.OBUID) || got.GetDistanceKm() != want.Value || got.GetEventUnixNano() != want.Unix {
+	if got.GetEventId() != want.EventID || got.GetObuId() != int64(want.OBUID) || got.GetDistanceKm() != want.Value || got.GetEventUnixNano() != want.Unix || got.GetTenantId() != want.TenantID {
 		t.Fatalf("RPC request = %+v, want %+v", got, want)
 	}
 }
@@ -61,7 +61,7 @@ func TestDialGRPCDoesNotReportUnavailableTargetAsConnected(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
-	conn, err := DialGRPC(ctx, target)
+	conn, err := DialGRPC(ctx, target, "service-test-token-0123456789abcdef")
 	if conn != nil {
 		_ = conn.Close()
 	}

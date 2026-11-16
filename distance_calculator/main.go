@@ -11,6 +11,7 @@ import (
 
 	"github.com/Tanmoy095/FleetToll-Engine/distance_calculator/client"
 	"github.com/Tanmoy095/FleetToll-Engine/internal/postgres"
+	"github.com/Tanmoy095/FleetToll-Engine/internal/tenantauth"
 )
 
 const defaultAggregatorGRPCTarget = "127.0.0.1:3001"
@@ -44,7 +45,12 @@ func main() {
 		grpcTarget = defaultAggregatorGRPCTarget
 	}
 	dialCtx, cancelDial := context.WithTimeout(context.Background(), 5*time.Second)
-	aggregatorClient, err := client.DialGRPC(dialCtx, grpcTarget)
+	serviceToken, err := tenantauth.ServiceTokenFromEnv()
+	if err != nil {
+		cancelDial()
+		log.Fatal(err)
+	}
+	aggregatorClient, err := client.DialGRPC(dialCtx, grpcTarget, serviceToken)
 	cancelDial()
 	if err != nil {
 		log.Fatalf("connect to aggregator gRPC service: %v", err)
