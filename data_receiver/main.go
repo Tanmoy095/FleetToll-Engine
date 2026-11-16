@@ -2,15 +2,20 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/Tanmoy095/FleetToll-Engine/internal/postgres"
+	"github.com/Tanmoy095/FleetToll-Engine/internal/tenantauth"
 	"github.com/Tanmoy095/FleetToll-Engine/types"
 	"github.com/gorilla/websocket"
 	"github.com/sirupsen/logrus"
@@ -34,25 +39,42 @@ func main() {
 func newWebSocketHandler(receiver *DataReceiver) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", receiver.handleWS)
-	return mux
+	return receiver.auth.HTTPMiddleware(mux)
 }
 
 // DataReceiver handles each WebSocket connection in its request goroutine.
 // The producer is shared; the socket and decoder state are connection-local.
 type DataReceiver struct {
 	prod DataProducer
+	auth tenantauth.Authenticator
 }
 
 func NewDataReceiver() (*DataReceiver, error) {
+	auth, err := tenantauth.FromEnv()
+	if err != nil {
+		return nil, err
+	}
+	if databaseURL := os.Getenv("DATABASE_URL"); databaseURL != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		pool, err := postgres.Open(ctx, databaseURL)
+		if err == nil {
+			err = postgres.ValidateTenantIDs(ctx, pool, auth.TenantIDs())
+			pool.Close()
+		}
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("validate tenant configuration: %w", err)
+		}
+	}
 	producer, err := NewKafkaProducer(kafkaTopicFromEnv())
 	if err != nil {
 		return nil, err
 	}
-	return newDataReceiver(NewLogMiddleware(producer)), nil
+	return newDataReceiver(NewLogMiddleware(producer), auth), nil
 }
 
-func newDataReceiver(producer DataProducer) *DataReceiver {
-	return &DataReceiver{prod: producer}
+func newDataReceiver(producer DataProducer, auth tenantauth.Authenticator) *DataReceiver {
+	return &DataReceiver{prod: producer, auth: auth}
 }
 
 func (dr *DataReceiver) produceData(data types.OBUData) error {
@@ -60,6 +82,15 @@ func (dr *DataReceiver) produceData(data types.OBUData) error {
 }
 
 func (dr *DataReceiver) handleWS(w http.ResponseWriter, r *http.Request) {
+	principal, ok := tenantauth.PrincipalFromContext(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if !principal.IsDevice() {
+		http.Error(w, "device credential required", http.StatusForbidden)
+		return
+	}
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  1028,
 		WriteBufferSize: 1028,
@@ -91,8 +122,13 @@ func (dr *DataReceiver) handleWS(w http.ResponseWriter, r *http.Request) {
 			writeWebSocketClose(conn, websocket.CloseInvalidFramePayloadData, "invalid telemetry payload")
 			return
 		}
+		data.TenantID = principal.TenantID
 		if err := validateOBUData(data); err != nil {
 			writeWebSocketClose(conn, websocket.ClosePolicyViolation, "invalid telemetry values")
+			return
+		}
+		if !principal.AllowsOBU(data.OBUID) {
+			writeWebSocketClose(conn, websocket.ClosePolicyViolation, "OBU ID is outside credential scope")
 			return
 		}
 		if err := dr.produceData(data); err != nil {
@@ -129,6 +165,9 @@ func decodeOBUData(payload []byte) (types.OBUData, error) {
 }
 
 func validateOBUData(data types.OBUData) error {
+	if data.TenantID <= 0 {
+		return errors.New("tenant ID must be positive")
+	}
 	if data.OBUID <= 0 {
 		return errors.New("OBU ID must be positive")
 	}

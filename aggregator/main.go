@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/Tanmoy095/FleetToll-Engine/internal/postgres"
+	"github.com/Tanmoy095/FleetToll-Engine/internal/tenantauth"
 	"github.com/Tanmoy095/FleetToll-Engine/types"
 )
 
@@ -30,6 +31,14 @@ func main() {
 	listenAddr := flag.String("listenaddr", ":3000", "the listen address of the HTTP server")
 	grpcListenAddr := flag.String("grpc-listenaddr", "127.0.0.1:3001", "the listen address of the internal gRPC server")
 	flag.Parse()
+	tenantKeys, err := tenantauth.FromEnv()
+	if err != nil {
+		log.Fatalf("load tenant credentials: %v", err)
+	}
+	serviceToken, err := tenantauth.ServiceTokenFromEnv()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	var store storer = NewMemoryStore()
 	if databaseURL := os.Getenv("DATABASE_URL"); databaseURL != "" {
@@ -40,6 +49,12 @@ func main() {
 			log.Fatalf("open PostgreSQL: %v", err)
 		}
 		defer pool.Close()
+		validateCtx, validateCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := postgres.ValidateTenantIDs(validateCtx, pool, tenantKeys.TenantIDs()); err != nil {
+			validateCancel()
+			log.Fatalf("validate tenant configuration: %v", err)
+		}
+		validateCancel()
 		store = NewPostgresStore(pool)
 	} else {
 		log.Print("DATABASE_URL is unset; using volatile in-memory aggregation")
@@ -47,12 +62,12 @@ func main() {
 	svc := NewLoggingMiddleware(NewInvoiceAggregator(store))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := runTransports(ctx, *listenAddr, *grpcListenAddr, svc); err != nil {
+	if err := runTransports(ctx, *listenAddr, *grpcListenAddr, svc, tenantKeys, serviceToken); err != nil {
 		log.Fatalf("aggregator server failed: %v", err)
 	}
 }
 
-func runTransports(ctx context.Context, httpAddr, grpcAddr string, svc Aggregator) error {
+func runTransports(ctx context.Context, httpAddr, grpcAddr string, svc Aggregator, tenantKeys tenantauth.Authenticator, serviceToken string) error {
 	httpListener, err := net.Listen("tcp", httpAddr)
 	if err != nil {
 		return fmt.Errorf("listen for HTTP: %w", err)
@@ -63,8 +78,8 @@ func runTransports(ctx context.Context, httpAddr, grpcAddr string, svc Aggregato
 		return fmt.Errorf("listen for gRPC: %w", err)
 	}
 	defer grpcListener.Close()
-	httpServer := &http.Server{Handler: newHTTPHandler(svc), ReadHeaderTimeout: 5 * time.Second}
-	grpcServer := newGRPCServer(svc)
+	httpServer := &http.Server{Handler: newHTTPHandler(svc, tenantKeys, serviceToken), ReadHeaderTimeout: 5 * time.Second}
+	grpcServer := newGRPCServer(svc, serviceToken)
 	httpErrors := make(chan error, 1)
 	grpcErrors := make(chan error, 1)
 	go func() { httpErrors <- httpServer.Serve(httpListener) }()
@@ -102,10 +117,14 @@ func runTransports(ctx context.Context, httpAddr, grpcAddr string, svc Aggregato
 	}
 }
 
-func newHTTPHandler(svc Aggregator) http.Handler {
+func newHTTPHandler(svc Aggregator, tenantKeys tenantauth.Authenticator, serviceToken string) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/aggregate", handleAggregate(svc))
-	mux.HandleFunc("/invoice", handleGetInvoice(svc))
+	aggregate := tenantauth.ServiceTokenHTTPMiddleware(serviceToken, handleAggregate(svc))
+	mux.Handle("/aggregate", aggregate)
+	mux.Handle("/invoice", tenantKeys.HTTPMiddleware(http.HandlerFunc(handleGetInvoice(svc))))
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+	})
 	return mux
 }
 
@@ -132,7 +151,20 @@ func handleGetInvoice(svc Aggregator) http.HandlerFunc {
 			return
 		}
 
-		invoice, err := svc.Calculate_Invoice(obuID)
+		principal, ok := tenantauth.PrincipalFromContext(r.Context())
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		if principal.Role != tenantauth.RoleTenant {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "tenant credential required"})
+			return
+		}
+		if !principal.AllowsOBU(obuID) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "OBU ID is outside credential scope"})
+			return
+		}
+		invoice, err := svc.Calculate_Invoice(principal.TenantID, obuID)
 		if err != nil {
 			if errors.Is(err, ErrInvoiceNotFound) {
 				writeJSON(w, http.StatusNotFound, map[string]string{"error": "invoice not found"})
@@ -176,7 +208,7 @@ func handleAggregate(svc Aggregator) http.HandlerFunc {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "request body must contain one JSON object"})
 			return
 		}
-		if !validEventID(distance.EventID) || distance.OBUID <= 0 || math.IsNaN(distance.Value) || math.IsInf(distance.Value, 0) || distance.Value < 0 || distance.Unix <= 0 {
+		if distance.TenantID <= 0 || !validEventID(distance.EventID) || distance.OBUID <= 0 || math.IsNaN(distance.Value) || math.IsInf(distance.Value, 0) || distance.Value < 0 || distance.Unix <= 0 {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "distance must include an event ID, positive OBU ID, non-negative finite value, and positive timestamp"})
 			return
 		}

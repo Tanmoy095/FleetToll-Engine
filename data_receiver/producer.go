@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -90,7 +89,7 @@ func (p *KafkaProducer) ProduceData(data types.OBUData) error {
 	if err != nil {
 		return fmt.Errorf("encode telemetry: %w", err)
 	}
-	key := []byte(strconv.Itoa(data.OBUID))
+	key := []byte(fmt.Sprintf("%d:%d", data.TenantID, data.OBUID))
 	delivery := make(chan kafka.Event, 1)
 	message := &kafka.Message{
 		TopicPartition: kafka.TopicPartition{Topic: &p.topic, Partition: kafka.PartitionAny},

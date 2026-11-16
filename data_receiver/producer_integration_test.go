@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strconv"
 	"testing"
 	"time"
 
@@ -62,7 +61,7 @@ func TestKafkaProducerDeliversKeyedTelemetry(t *testing.T) {
 	}
 	defer producer.Close()
 
-	want := types.OBUData{OBUID: 8142, Latitude: 23.7806, Longitude: 90.4074}
+	want := types.OBUData{TenantID: types.LegacyTenantID, OBUID: 8142, Latitude: 23.7806, Longitude: 90.4074}
 	if err := producer.ProduceData(want); err != nil {
 		t.Fatalf("produce telemetry: %v", err)
 	}
@@ -85,8 +84,8 @@ func TestKafkaProducerDeliversKeyedTelemetry(t *testing.T) {
 	if got == nil {
 		t.Fatal("timed out waiting for telemetry from Kafka")
 	}
-	if key := string(got.Key); key != strconv.Itoa(want.OBUID) {
-		t.Errorf("record key = %q, want OBU ID %d", key, want.OBUID)
+	if key := string(got.Key); key != fmt.Sprintf("%d:%d", want.TenantID, want.OBUID) {
+		t.Errorf("record key = %q, want tenant/OBU key for %d/%d", key, want.TenantID, want.OBUID)
 	}
 	var actual types.OBUData
 	if err := json.Unmarshal(got.Value, &actual); err != nil {

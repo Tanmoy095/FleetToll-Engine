@@ -30,7 +30,7 @@ func TestKafkaProducerUsesDefaultsWhenEnvironmentIsUnset(t *testing.T) {
 
 func TestKafkaProducerRejectsInvalidTelemetryBeforeKafkaAccess(t *testing.T) {
 	producer := &KafkaProducer{topic: "telemetry"}
-	err := producer.ProduceData(types.OBUData{OBUID: 0, Latitude: 0, Longitude: 0})
+	err := producer.ProduceData(types.OBUData{TenantID: types.LegacyTenantID, OBUID: 0, Latitude: 0, Longitude: 0})
 	if err == nil {
 		t.Fatal("expected validation error")
 	}
