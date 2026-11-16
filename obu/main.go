@@ -4,70 +4,58 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"net/http"
+	"os"
+	"strconv"
+	"strings"
 	"time"
 
-	"github.com/Tanmoy095/FleetToll-Engine/types" // Shared telemetry contract.
 	"github.com/gorilla/websocket"
 )
 
-const wsEndpoint = "ws://127.0.0.1:30000/ws" // WebSocket server endpoint
+const wsEndpoint = "ws://127.0.0.1:30000/ws"
 
-var sendInterval = time.Second * 5 // Interval between sending data packets
+var sendInterval = 5 * time.Second
 
-// genLatLong generates a random latitude and longitude pair
-func genLatLong() (float64, float64) {
-	return genCoord(), genCoord()
+type telemetryFrame struct {
+	OBUID int     `json:"obuID"`
+	Lat   float64 `json:"lat"`
+	Long  float64 `json:"long"`
 }
 
-// genCoord generates a random coordinate value
-func genCoord() float64 {
-	n := float64(rand.Intn(100) + 1) // Random integer part (1-100)
-	f := rand.Float64()              // Random decimal part (0-1)
-	return n + f                     // Combine to get the final coordinate
+func genLatLong() (float64, float64) {
+	return rand.Float64()*170 - 85, rand.Float64()*360 - 180
 }
 
 func main() {
-	obuIDS := generateOBUIDS(20) // Generate 20 random OBU IDs
+	deviceToken := strings.TrimSpace(os.Getenv("FLEETTOLL_SIMULATOR_DEVICE_TOKEN"))
+	if deviceToken == "" {
+		log.Fatal("FLEETTOLL_SIMULATOR_DEVICE_TOKEN must be configured")
+	}
+	obuValue := strings.TrimSpace(os.Getenv("FLEETTOLL_SIMULATOR_OBU_ID"))
+	if obuValue == "" {
+		obuValue = "12345"
+	}
+	obuID, err := strconv.Atoi(obuValue)
+	if err != nil || obuID <= 0 {
+		log.Fatal("FLEETTOLL_SIMULATOR_OBU_ID must be a positive integer")
+	}
 
-	// Establish a WebSocket connection
-	conn, _, err := websocket.DefaultDialer.Dial(wsEndpoint, nil)
+	header := http.Header{"Authorization": []string{"Bearer " + deviceToken}}
+	conn, _, err := websocket.DefaultDialer.Dial(wsEndpoint, header)
 	if err != nil {
-		log.Fatal(err) // Terminate if connection fails
+		log.Fatal(err)
 	}
-
-	// Infinite loop to continuously send data to the server
+	defer conn.Close()
 	for {
-		// Iterate over each OBU ID and send location data
-		for i := 0; i < len(obuIDS); i++ {
-			lat, long := genLatLong() // Generate random latitude and longitude
-			data := types.OBUData{
-				OBUID:     obuIDS[i],
-				Latitude:  lat,
-				Longitude: long,
-			}
-
-			// Print the data being sent
-			fmt.Printf("Sending data: %+v\n", data)
-
-			// Send the data as JSON over the WebSocket connection
-			if err := conn.WriteJSON(data); err != nil {
-				log.Fatal(err) // Terminate program if sending fails
-			}
+		lat, long := genLatLong()
+		frame := telemetryFrame{OBUID: obuID, Lat: lat, Long: long}
+		fmt.Printf("Sending telemetry for OBU %d\n", obuID)
+		if err := conn.WriteJSON(frame); err != nil {
+			log.Fatal(err)
 		}
-		time.Sleep(sendInterval) // Wait before sending the next batch
+		time.Sleep(sendInterval)
 	}
 }
 
-// generateOBUIDS generates 'n' random OBU IDs
-func generateOBUIDS(n int) []int {
-	ids := make([]int, n)
-	for i := 0; i < n; i++ {
-		ids[i] = rand.Intn(999999) // Generate a random OBU ID (0-999999)
-	}
-	return ids
-}
-
-// init function initializes the random number generator seed
-func init() {
-	rand.Seed(time.Now().UnixNano()) // Ensure random values on each execution
-}
+func init() { rand.Seed(time.Now().UnixNano()) }

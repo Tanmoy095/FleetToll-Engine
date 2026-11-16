@@ -14,6 +14,7 @@ import (
 	fleettollv1 "github.com/Tanmoy095/FleetToll-Engine/api/fleettoll/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 )
 
 type result struct {
@@ -35,6 +36,11 @@ func main() {
 		os.Exit(1)
 	}
 	defer conn.Close()
+	token := os.Getenv("AGGREGATOR_GRPC_TOKEN")
+	if len(token) < 32 {
+		fmt.Fprintln(os.Stderr, "AGGREGATOR_GRPC_TOKEN must contain at least 32 bytes")
+		os.Exit(2)
+	}
 	client := fleettollv1.NewAggregatorServiceClient(conn)
 	start := make(chan struct{})
 	results := make(chan result, *users)
@@ -46,7 +52,8 @@ func main() {
 			<-start
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			request := &fleettollv1.AggregateDistanceRequest{EventId: fmt.Sprintf("load:%d:%d", time.Now().UnixNano(), i), ObuId: 900001, DistanceKm: 0.01, EventUnixNano: time.Now().UnixNano()}
+			ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+token)
+			request := &fleettollv1.AggregateDistanceRequest{TenantId: 1, EventId: fmt.Sprintf("load:%d:%d", time.Now().UnixNano(), i), ObuId: 900001, DistanceKm: 0.01, EventUnixNano: time.Now().UnixNano()}
 			began := time.Now()
 			_, err := client.AggregateDistance(ctx, request)
 			results <- result{elapsed: time.Since(began), err: err}
